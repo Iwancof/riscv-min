@@ -93,6 +93,8 @@ module rv32i_core #(
     // ================================================================
     logic        md_active;
     logic        md_is_mul;
+    logic        md_is_shift;
+    logic [1:0]  md_shift_dir;  // {f7b5, funct3[2]} -> 00=SLL, 01=SRL, 11=SRA
     logic [5:0]  md_cnt;
     logic [31:0] md_lo, md_hi, md_b;
     logic        md_nq, md_nr, md_bz;
@@ -589,15 +591,19 @@ module rv32i_core #(
     // ================================================================
     // Dual-issue feasibility
     // ================================================================
+    wire b_is_shift = (id_opcode_b == OP_IMM || id_opcode_b == OP_REG) &&
+                      (id_funct3_b == 3'b001 || id_funct3_b == 3'b101);
     wire b_structural = id_mem_read_b || id_mem_write_b || id_is_amo_b || id_is_lr_b || id_is_sc_b ||
-                        id_is_muldiv_b || id_is_halt_b || id_is_trap_b;
+                        id_is_muldiv_b || id_is_halt_b || id_is_trap_b || b_is_shift;
     wire b_raw = id_rd_we_a && (id_rd_a != 5'd0) &&
                  ((id_rs1_b == id_rd_a) || (id_rs2_b == id_rd_a));
     wire b_waw = id_rd_we_a && id_rd_we_b && (id_rd_a != 5'd0) && (id_rd_a == id_rd_b);
     wire a_is_redirect = id_is_jal_a || id_is_jalr_a || id_is_branch_a;
 
+    wire a_is_shift = (id_opcode_a == OP_IMM || id_opcode_a == OP_REG) &&
+                      (id_funct3_a == 3'b001 || id_funct3_a == 3'b101);
     wire can_dual_issue = ifid_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
-                          !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a;
+                          !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a && !a_is_shift;
 
     // ================================================================
     // Register file read with WB write-through (4 read ports)
@@ -714,12 +720,9 @@ module rv32i_core #(
     always_comb begin
         case (idex_alu_op_a)
             4'b0000, 4'b1000: alu_result_a = alu_sum_a;
-            4'b0001:          alu_result_a = alu_a_a << alu_b_a[4:0];
             4'b0010:          alu_result_a = {31'b0, alu_lt_a};
             4'b0011:          alu_result_a = {31'b0, alu_ltu_a};
             4'b0100:          alu_result_a = alu_a_a ^ alu_b_a;
-            4'b0101:          alu_result_a = alu_a_a >> alu_b_a[4:0];
-            4'b1101:          alu_result_a = $signed(alu_a_a) >>> alu_b_a[4:0];
             4'b0110:          alu_result_a = alu_a_a | alu_b_a;
             4'b0111:          alu_result_a = alu_a_a & alu_b_a;
             default:          alu_result_a = alu_sum_a;
@@ -749,10 +752,14 @@ module rv32i_core #(
                       (idex_is_jal_a || idex_is_jalr_a || branch_taken_a);
     wire [31:0] redirect_target_a = idex_is_jalr_a ? {alu_result_a[31:1], 1'b0} : branch_target_a;
 
+    // Shift detection -- iterative shifts reuse md_* state machine
+    wire idex_is_shift_a = idex_valid_a && !idex_is_muldiv_a &&
+                           (idex_alu_op_a == 4'b0001 || idex_alu_op_a == 4'b0101 || idex_alu_op_a == 4'b1101);
+
     // M extension -- iterative multiply / divide (slot A only)
     wire idex_is_mul_a = idex_is_muldiv_a && !idex_funct3_a[2];
     wire idex_is_div_a = idex_is_muldiv_a && idex_funct3_a[2];
-    wire start_muldiv  = idex_valid_a && idex_is_muldiv_a && !md_active;
+    wire start_muldiv  = idex_valid_a && (idex_is_muldiv_a || idex_is_shift_a) && !md_active;
 
     wire        div_signed = !idex_funct3_a[0];
     wire [31:0] div_abs_a  = (div_signed && fwd_rs1_a[31]) ? (~fwd_rs1_a + 32'd1) : fwd_rs1_a;
@@ -769,7 +776,8 @@ module rv32i_core #(
     wire [31:0] div_r_final = md_bz ? md_raw_dividend : (md_nr ? (~md_hi + 32'd1) : md_hi);
     wire [31:0] div_result_iter = idex_funct3_a[1] ? div_r_final : div_q_final;
 
-    wire [31:0] ex_result_a = (idex_is_muldiv_a && md_ready) ?
+    wire [31:0] ex_result_a = (idex_is_shift_a && md_ready) ? md_lo :
+                              (idex_is_muldiv_a && md_ready) ?
                               (md_is_mul ? mul_result_iter : div_result_iter) : alu_result_a;
 
     // ================================================================
@@ -789,12 +797,9 @@ module rv32i_core #(
     always_comb begin
         case (idex_alu_op_b)
             4'b0000, 4'b1000: alu_result_b = alu_sum_b;
-            4'b0001:          alu_result_b = alu_a_b << alu_b_b[4:0];
             4'b0010:          alu_result_b = {31'b0, alu_lt_b};
             4'b0011:          alu_result_b = {31'b0, alu_ltu_b};
             4'b0100:          alu_result_b = alu_a_b ^ alu_b_b;
-            4'b0101:          alu_result_b = alu_a_b >> alu_b_b[4:0];
-            4'b1101:          alu_result_b = $signed(alu_a_b) >>> alu_b_b[4:0];
             4'b0110:          alu_result_b = alu_a_b | alu_b_b;
             4'b0111:          alu_result_b = alu_a_b & alu_b_b;
             default:          alu_result_b = alu_sum_b;
@@ -832,7 +837,7 @@ module rv32i_core #(
     wire redirect = redirect_a || redirect_b;
     wire [31:0] redirect_target = redirect_a ? redirect_target_a : redirect_target_b;
 
-    wire stall_muldiv = idex_valid_a && idex_is_muldiv_a && !md_ready;
+    wire stall_muldiv = idex_valid_a && (idex_is_muldiv_a || idex_is_shift_a) && !md_ready;
     wire stall_load   = load_use;
     wire stall_pipe   = stall_muldiv || stall_load;
     wire flush      = redirect || (idex_valid_a && (idex_is_trap_a || idex_is_halt_a));
@@ -1124,9 +1129,18 @@ module rv32i_core #(
                 end
             end
 
-            // ---- Mul/Div iterative unit ----
-            if (start_muldiv) begin
+            // ---- Mul/Div/Shift iterative unit ----
+            if (start_muldiv && idex_is_shift_a) begin
+                // Iterative shift setup
+                md_active     <= 1'b1;
+                md_is_shift   <= 1'b1;
+                md_is_mul     <= 1'b0;
+                md_lo         <= fwd_rs1_a;
+                md_cnt        <= {1'b0, idex_alu_src_imm_a ? idex_imm_a[4:0] : fwd_rs2_a[4:0]};
+                md_shift_dir  <= {idex_alu_op_a[3], idex_alu_op_a[2]};  // {f7b5, funct3[2]}: 00=SLL, 01=SRL, 11=SRA
+            end else if (start_muldiv) begin
                 md_active        <= 1'b1;
+                md_is_shift      <= 1'b0;
                 md_cnt           <= 6'd32;
                 if (idex_is_mul_a) begin
                     // Iterative multiply setup
@@ -1176,7 +1190,13 @@ module rv32i_core #(
                     md_hi_result     <= 1'b0;
                 end
             end else if (md_active && md_cnt != 6'd0) begin
-                if (md_is_mul) begin
+                if (md_is_shift) begin
+                    case (md_shift_dir)
+                        2'b00:   md_lo <= {md_lo[30:0], 1'b0};       // SLL
+                        2'b01:   md_lo <= {1'b0, md_lo[31:1]};       // SRL
+                        default: md_lo <= {md_lo[31], md_lo[31:1]};  // SRA
+                    endcase
+                end else if (md_is_mul) begin
                     // Multiply iteration: right-shift approach
                     if (md_lo[0]) begin
                         {md_hi, md_lo} <= {mul_partial, md_lo[31:1]};
