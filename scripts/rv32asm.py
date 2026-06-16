@@ -102,6 +102,36 @@ C_OPS = {
     "c.swsp",
 }
 
+# A extension instructions: funct5 values
+A_OPS = {
+    "lr.w":      0b00010,
+    "sc.w":      0b00011,
+    "amoswap.w": 0b00001,
+    "amoadd.w":  0b00000,
+    "amoxor.w":  0b00100,
+    "amoand.w":  0b01100,
+    "amoor.w":   0b01000,
+    "amomin.w":  0b10000,
+    "amomax.w":  0b10100,
+    "amominu.w": 0b11000,
+    "amomaxu.w": 0b11100,
+}
+
+
+def encode_amo(funct5, rs2, rs1, funct3, rd):
+    aq = 0
+    rl = 0
+    return (
+        ((funct5 & 0x1F) << 27)
+        | ((aq & 1) << 26)
+        | ((rl & 1) << 25)
+        | ((rs2 & 0x1F) << 20)
+        | ((rs1 & 0x1F) << 15)
+        | ((funct3 & 0x7) << 12)
+        | ((rd & 0x1F) << 7)
+        | 0b0101111
+    )
+
 
 class AsmError(Exception):
     pass
@@ -879,6 +909,21 @@ def encode_item(pc, op, operands, labels):
         if rs1 != 2:
             raise AsmError("c.swsp base must be x2/sp")
         return encode_c_swsp(reg(operands[0]), off), 2
+
+    # ---- A extension instructions ----
+    if op == "lr.w":
+        expect(op, operands, 2)
+        imm, rs1 = parse_mem(operands[1])
+        if imm != 0:
+            raise AsmError("lr.w offset must be 0")
+        return encode_amo(A_OPS["lr.w"], 0, rs1, 0b010, reg(operands[0])), 4
+
+    if op in A_OPS and op != "lr.w":
+        expect(op, operands, 3)
+        imm, rs1 = parse_mem(operands[2])
+        if imm != 0:
+            raise AsmError(f"{op} offset must be 0")
+        return encode_amo(A_OPS[op], reg(operands[1]), rs1, 0b010, reg(operands[0])), 4
 
     # ---- Standard 32-bit instructions ----
     if op in R_OPS:

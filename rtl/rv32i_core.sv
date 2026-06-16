@@ -21,7 +21,7 @@ module rv32i_core #(
                      OP_BRANCH = 7'b1100011, OP_LOAD   = 7'b0000011,
                      OP_STORE  = 7'b0100011, OP_IMM    = 7'b0010011,
                      OP_REG    = 7'b0110011, OP_FENCE  = 7'b0001111,
-                     OP_SYSTEM = 7'b1110011;
+                     OP_SYSTEM = 7'b1110011, OP_AMO    = 7'b0101111;
 
     localparam [1:0] WB_EX = 2'b00, WB_MEM = 2'b01, WB_PC4 = 2'b10;
 
@@ -47,6 +47,8 @@ module rv32i_core #(
     logic        idex_mem_read, idex_mem_write, idex_rd_we;
     logic        idex_is_branch, idex_is_jal, idex_is_jalr;
     logic        idex_is_muldiv, idex_is_halt, idex_is_trap;
+    logic        idex_is_amo, idex_is_lr, idex_is_sc;
+    logic [4:0]  idex_amo_funct5;
     logic [1:0]  idex_wb_sel;
     logic        idex_valid;
     logic        idex_compressed;
@@ -56,6 +58,8 @@ module rv32i_core #(
     logic [4:0]  exmem_rd;
     logic [2:0]  exmem_funct3;
     logic        exmem_rd_we, exmem_mem_read, exmem_mem_write;
+    logic        exmem_is_amo, exmem_is_lr, exmem_is_sc;
+    logic [4:0]  exmem_amo_funct5;
     logic [1:0]  exmem_wb_sel;
     logic        exmem_is_halt, exmem_is_trap, exmem_valid;
 
@@ -75,6 +79,12 @@ module rv32i_core #(
 
     wire [32:0] div_trial = {div_rem, div_quot[31]} - {1'b0, div_dvsr};
     wire        div_ready = div_active && (div_cnt == 6'd0);
+
+    // ================================================================
+    // A extension — LR/SC reservation set
+    // ================================================================
+    logic [31:0] resv_addr;
+    logic        resv_valid;
 
     // ================================================================
     // RV32C Decompressor — map 16-bit compressed instructions to 32-bit
@@ -341,6 +351,7 @@ module rv32i_core #(
             OP_JAL:                    id_imm = imm_j;
             OP_BRANCH:                 id_imm = imm_b;
             OP_STORE:                  id_imm = imm_s;
+            OP_AMO:                    id_imm = 32'b0;
             default:                   id_imm = imm_i;
         endcase
     end
@@ -351,6 +362,8 @@ module rv32i_core #(
     logic        id_mem_read, id_mem_write, id_rd_we;
     logic        id_is_branch, id_is_jal, id_is_jalr;
     logic        id_is_muldiv, id_is_halt, id_is_trap;
+    logic        id_is_amo, id_is_lr, id_is_sc;
+    logic [4:0]  id_amo_funct5;
     logic [1:0]  id_wb_sel;
 
     always_comb begin
@@ -366,6 +379,10 @@ module rv32i_core #(
         id_is_muldiv   = 1'b0;
         id_is_halt     = 1'b0;
         id_is_trap     = 1'b0;
+        id_is_amo      = 1'b0;
+        id_is_lr       = 1'b0;
+        id_is_sc       = 1'b0;
+        id_amo_funct5  = 5'b0;
         id_wb_sel      = WB_EX;
 
         case (id_opcode)
@@ -417,6 +434,23 @@ module rv32i_core #(
                     id_rd_we  = 1'b1;
                 end
             end
+            OP_AMO: begin
+                id_rd_we       = 1'b1;
+                id_mem_read    = 1'b1;
+                id_alu_src_imm = 1'b1;
+                id_wb_sel      = WB_MEM;
+                id_amo_funct5  = ifid_instr[31:27];
+                if (ifid_instr[31:27] == 5'b00010) begin
+                    id_is_lr = 1'b1;
+                end else if (ifid_instr[31:27] == 5'b00011) begin
+                    id_is_sc    = 1'b1;
+                    id_mem_write = 1'b1;
+                    id_wb_sel   = WB_EX;
+                end else begin
+                    id_is_amo    = 1'b1;
+                    id_mem_write = 1'b1;
+                end
+            end
             OP_FENCE: ; // NOP
             OP_SYSTEM: begin
                 if (ifid_instr == 32'h00100073)
@@ -439,8 +473,10 @@ module rv32i_core #(
 
     // Hazard detection (load-use)
     wire id_uses_rs1 = (id_opcode == OP_REG || id_opcode == OP_IMM || id_opcode == OP_LOAD ||
-                        id_opcode == OP_STORE || id_opcode == OP_BRANCH || id_opcode == OP_JALR);
-    wire id_uses_rs2 = (id_opcode == OP_REG || id_opcode == OP_STORE || id_opcode == OP_BRANCH);
+                        id_opcode == OP_STORE || id_opcode == OP_BRANCH || id_opcode == OP_JALR ||
+                        id_opcode == OP_AMO);
+    wire id_uses_rs2 = (id_opcode == OP_REG || id_opcode == OP_STORE || id_opcode == OP_BRANCH ||
+                        id_opcode == OP_AMO);
 
     wire load_use = idex_valid && idex_mem_read && (idex_rd != 5'd0) && ifid_valid &&
                     ((id_uses_rs1 && idex_rd == id_rs1) ||
@@ -593,7 +629,11 @@ module rv32i_core #(
     logic [3:0] store_strobe;
     always_comb begin
         store_strobe = 4'b0000;
-        if (exmem_valid && exmem_mem_write) begin
+        if (exmem_valid && exmem_is_amo) begin
+            store_strobe = 4'b1111;
+        end else if (exmem_valid && exmem_is_sc) begin
+            store_strobe = sc_success ? 4'b1111 : 4'b0000;
+        end else if (exmem_valid && exmem_mem_write) begin
             case (exmem_funct3)
                 3'b000:  store_strobe = 4'b0001 << mem_off;
                 3'b001:  store_strobe = 4'b0011 << mem_off;
@@ -603,11 +643,39 @@ module rv32i_core #(
         end
     end
 
-    assign dmem_wdata_o = store_data;
+    assign dmem_wdata_o = (exmem_is_amo) ? amo_result :
+                          (exmem_is_sc)  ? exmem_rs2_val : store_data;
     assign dmem_wstrb_o = store_strobe;
 
+    // ================================================================
+    // A extension — AMO compute + LR/SC logic in MEM stage
+    // ================================================================
+    logic [31:0] amo_result;
+    always_comb begin
+        case (exmem_amo_funct5)
+            5'b00001: amo_result = exmem_rs2_val;                                    // AMOSWAP
+            5'b00000: amo_result = dmem_rdata_i + exmem_rs2_val;                     // AMOADD
+            5'b00100: amo_result = dmem_rdata_i ^ exmem_rs2_val;                     // AMOXOR
+            5'b01100: amo_result = dmem_rdata_i & exmem_rs2_val;                     // AMOAND
+            5'b01000: amo_result = dmem_rdata_i | exmem_rs2_val;                     // AMOOR
+            5'b10000: amo_result = ($signed(dmem_rdata_i) < $signed(exmem_rs2_val))  // AMOMIN
+                                   ? dmem_rdata_i : exmem_rs2_val;
+            5'b10100: amo_result = ($signed(dmem_rdata_i) > $signed(exmem_rs2_val))  // AMOMAX
+                                   ? dmem_rdata_i : exmem_rs2_val;
+            5'b11000: amo_result = (dmem_rdata_i < exmem_rs2_val)                    // AMOMINU
+                                   ? dmem_rdata_i : exmem_rs2_val;
+            5'b11100: amo_result = (dmem_rdata_i > exmem_rs2_val)                    // AMOMAXU
+                                   ? dmem_rdata_i : exmem_rs2_val;
+            default:  amo_result = exmem_rs2_val;
+        endcase
+    end
+
+    wire sc_success = exmem_is_sc && resv_valid && (resv_addr == exmem_result);
+
     // MEM result mux
-    wire [31:0] mem_rd_data = (exmem_wb_sel == WB_MEM) ? load_data :
+    wire [31:0] mem_rd_data = exmem_is_sc  ? {31'b0, ~sc_success} :
+                              (exmem_is_amo || exmem_is_lr) ? dmem_rdata_i :
+                              (exmem_wb_sel == WB_MEM) ? load_data :
                               (exmem_wb_sel == WB_PC4) ? exmem_pc4 : exmem_result;
 
     // ================================================================
@@ -624,6 +692,7 @@ module rv32i_core #(
             halt_o      <= 1'b0;
             div_active  <= 1'b0;
             hwbuf_valid <= 1'b0;
+            resv_valid  <= 1'b0;
             for (int i = 1; i < 32; i++) regs[i] <= 32'b0;
         end else if (halted) begin
             // frozen
@@ -661,6 +730,10 @@ module rv32i_core #(
                 exmem_wb_sel    <= idex_wb_sel;
                 exmem_is_halt   <= idex_is_halt;
                 exmem_is_trap   <= idex_is_trap;
+                exmem_is_amo    <= idex_is_amo;
+                exmem_is_lr     <= idex_is_lr;
+                exmem_is_sc     <= idex_is_sc;
+                exmem_amo_funct5<= idex_amo_funct5;
             end
 
             // ---- ID/EX update ----
@@ -691,6 +764,10 @@ module rv32i_core #(
                 idex_wb_sel     <= id_wb_sel;
                 idex_is_halt    <= id_is_halt;
                 idex_is_trap    <= id_is_trap;
+                idex_is_amo     <= id_is_amo;
+                idex_is_lr      <= id_is_lr;
+                idex_is_sc      <= id_is_sc;
+                idex_amo_funct5 <= id_amo_funct5;
                 idex_compressed <= ifid_compressed;
             end
 
@@ -754,6 +831,17 @@ module rv32i_core #(
                 div_cnt <= div_cnt - 6'd1;
             end else if (div_ready) begin
                 div_active <= 1'b0;
+            end
+
+            // ---- LR/SC reservation tracking ----
+            if (exmem_valid && exmem_is_lr) begin
+                resv_addr  <= exmem_result;
+                resv_valid <= 1'b1;
+            end else if (exmem_valid && exmem_is_sc) begin
+                resv_valid <= 1'b0;
+            end else if (exmem_valid && exmem_mem_write && resv_valid &&
+                         exmem_result == resv_addr) begin
+                resv_valid <= 1'b0;
             end
         end
     end
