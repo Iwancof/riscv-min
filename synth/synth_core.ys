@@ -11,8 +11,6 @@ opt
 wreduce
 peepopt
 opt -full
-freduce
-opt -full
 
 techmap
 opt -full

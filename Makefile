@@ -22,7 +22,7 @@ $(BUILD_DIR)/programs/%.hex: programs/%.S scripts/rv32asm.py | $(BUILD_DIR)/prog
 	python3 scripts/rv32asm.py $< -o $@ --listing $(BUILD_DIR)/programs/$*.lst
 
 $(SIM_EXE): $(RTL) sim/tb_rv32i.cpp | $(BUILD_DIR)/obj_dir
-	verilator -Wall --trace --cc --exe --build --Mdir $(BUILD_DIR)/obj_dir \
+	verilator -Wall -Wno-UNUSEDSIGNAL --trace --cc --exe --build --Mdir $(BUILD_DIR)/obj_dir \
 		--top-module rv32i_core $(RTL) sim/tb_rv32i.cpp \
 		-CFLAGS "-std=c++17 -O2" -o Vrv32i_core
 
