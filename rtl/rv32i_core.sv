@@ -111,6 +111,12 @@ module rv32i_core #(
     logic [31:0] md_raw_dividend;
     logic        md_negate, md_hi_result;
 
+    // ================================================================
+    // ALU sharing state: time-multiplex slot A's ALU for slot B
+    // ================================================================
+    logic        ex_phase;           // 0 = computing slot A, 1 = computing slot B
+    logic [31:0] ex_result_a_saved;  // holds A's result during phase 1
+
     wire [32:0] div_trial   = {md_hi, md_lo[31]} - {1'b0, md_b};
     wire [32:0] mul_partial = {1'b0, md_hi} + {1'b0, md_b};
     wire        md_ready    = md_active && (md_cnt == 6'd0);
@@ -680,42 +686,53 @@ module rv32i_core #(
     // Slot B is bypass-free: uses direct EX-stage RF reads
 
     // ================================================================
-    // EX stage -- ALU A (full: ALU + branch + mul/div)
+    // EX stage -- Shared ALU (time-multiplexed for slots A and B)
     // ================================================================
+    // Phase 0: ALU computes slot A's result
+    // Phase 1: ALU computes slot B's result using B's operands
+    wire in_phase_b = (ex_phase == 1'b1);
+
+    // Slot A operands (used in phase 0)
     wire [31:0] alu_a_a = idex_alu_src_pc_a ? idex_pc_a : fwd_rs1_a;
     wire [31:0] alu_b_a = idex_alu_src_imm_a ? idex_imm_a : fwd_rs2_a;
 
-    wire        alu_do_sub_a = (idex_alu_op_a == 4'b1000) || (idex_alu_op_a == 4'b0010) || (idex_alu_op_a == 4'b0011);
-    wire [32:0] alu_ext_a = {1'b0, alu_a_a} + {1'b0, alu_do_sub_a ? ~alu_b_a : alu_b_a} + {32'b0, alu_do_sub_a};
-    wire [31:0] alu_sum_a   = alu_ext_a[31:0];
-    wire        alu_carry_a = alu_ext_a[32];
-    wire        alu_lt_a    = (alu_a_a[31] != alu_b_a[31]) ? alu_a_a[31] : alu_sum_a[31];
-    wire        alu_ltu_a   = !alu_carry_a;
+    // Mux ALU inputs: phase 0 = slot A, phase 1 = slot B
+    wire [31:0] alu_in_a = in_phase_b ? ex_rf_rs1_b : alu_a_a;
+    wire [31:0] alu_in_b = in_phase_b ? (idex_alu_src_imm_b ? idex_imm_b : ex_rf_rs2_b) : alu_b_a;
+    wire [3:0]  alu_op   = in_phase_b ? idex_alu_op_b : idex_alu_op_a;
 
-    logic [31:0] alu_result_a;
+    wire        alu_do_sub = (alu_op == 4'b1000) || (alu_op == 4'b0010) || (alu_op == 4'b0011);
+    wire [32:0] alu_ext = {1'b0, alu_in_a} + {1'b0, alu_do_sub ? ~alu_in_b : alu_in_b} + {32'b0, alu_do_sub};
+    wire [31:0] alu_sum   = alu_ext[31:0];
+    wire        alu_carry = alu_ext[32];
+    wire        alu_lt    = (alu_in_a[31] != alu_in_b[31]) ? alu_in_a[31] : alu_sum[31];
+    wire        alu_ltu   = !alu_carry;
+
+    logic [31:0] alu_result;
     always_comb begin
-        case (idex_alu_op_a)
-            4'b0000, 4'b1000: alu_result_a = alu_sum_a;
-            4'b0010:          alu_result_a = {31'b0, alu_lt_a};
-            4'b0011:          alu_result_a = {31'b0, alu_ltu_a};
-            4'b0100:          alu_result_a = alu_a_a ^ alu_b_a;
-            4'b0110:          alu_result_a = alu_a_a | alu_b_a;
-            4'b0111:          alu_result_a = alu_a_a & alu_b_a;
-            default:          alu_result_a = alu_sum_a;
+        case (alu_op)
+            4'b0000, 4'b1000: alu_result = alu_sum;
+            4'b0010:          alu_result = {31'b0, alu_lt};
+            4'b0011:          alu_result = {31'b0, alu_ltu};
+            4'b0100:          alu_result = alu_in_a ^ alu_in_b;
+            4'b0110:          alu_result = alu_in_a | alu_in_b;
+            4'b0111:          alu_result = alu_in_a & alu_in_b;
+            default:          alu_result = alu_sum;
         endcase
     end
 
+    // Branch logic uses ALU results (only valid in phase 0 when slot A is active)
     logic branch_taken_a;
     always_comb begin
         branch_taken_a = 1'b0;
-        if (idex_is_branch_a) begin
+        if (idex_is_branch_a && !in_phase_b) begin
             case (idex_funct3_a)
-                3'b000:  branch_taken_a = (alu_sum_a == 32'b0);
-                3'b001:  branch_taken_a = (alu_sum_a != 32'b0);
-                3'b100:  branch_taken_a = alu_lt_a;
-                3'b101:  branch_taken_a = !alu_lt_a;
-                3'b110:  branch_taken_a = alu_ltu_a;
-                3'b111:  branch_taken_a = !alu_ltu_a;
+                3'b000:  branch_taken_a = (alu_sum == 32'b0);
+                3'b001:  branch_taken_a = (alu_sum != 32'b0);
+                3'b100:  branch_taken_a = alu_lt;
+                3'b101:  branch_taken_a = !alu_lt;
+                3'b110:  branch_taken_a = alu_ltu;
+                3'b111:  branch_taken_a = !alu_ltu;
                 default: ;
             endcase
         end
@@ -724,9 +741,9 @@ module rv32i_core #(
     wire [31:0] branch_target_a = idex_pc_a + idex_imm_a;
     wire [31:0] ex_pc4_a = idex_pc_a + (idex_compressed_a ? 32'd2 : 32'd4);
 
-    wire redirect_a = idex_valid_a && !idex_is_trap_a && !idex_is_halt_a &&
+    wire redirect_a = idex_valid_a && !idex_is_trap_a && !idex_is_halt_a && !in_phase_b &&
                       (idex_is_jal_a || idex_is_jalr_a || branch_taken_a);
-    wire [31:0] redirect_target_a = idex_is_jalr_a ? {alu_result_a[31:1], 1'b0} : branch_target_a;
+    wire [31:0] redirect_target_a = idex_is_jalr_a ? {alu_result[31:1], 1'b0} : branch_target_a;
 
     // Shift detection -- iterative shifts reuse md_* state machine
     wire idex_is_shift_a = idex_valid_a && !idex_is_muldiv_a &&
@@ -752,38 +769,16 @@ module rv32i_core #(
     wire [31:0] div_r_final = md_bz ? md_raw_dividend : (md_nr ? (~md_hi + 32'd1) : md_hi);
     wire [31:0] div_result_iter = idex_funct3_a[1] ? div_r_final : div_q_final;
 
+    // ex_result_a uses alu_result (which is for slot A in phase 0)
     wire [31:0] ex_result_a = (idex_is_shift_a && md_ready) ? md_lo :
                               (idex_is_muldiv_a && md_ready) ?
-                              (md_is_mul ? mul_result_iter : div_result_iter) : alu_result_a;
+                              (md_is_mul ? mul_result_iter : div_result_iter) : alu_result;
 
-    // ================================================================
-    // EX stage -- ALU B (ALU + branch, no mul/div/mem)
-    // ================================================================
-    wire [31:0] alu_a_b = ex_rf_rs1_b;  // no AUIPC in slot B
-    wire [31:0] alu_b_b = idex_alu_src_imm_b ? idex_imm_b : ex_rf_rs2_b;
+    // Slot B result comes from ALU in phase 1 (or saved from phase 1 computation)
+    wire [31:0] ex_result_b = alu_result;  // valid when in_phase_b
 
-    wire        alu_do_sub_b = (idex_alu_op_b == 4'b1000) || (idex_alu_op_b == 4'b0010) || (idex_alu_op_b == 4'b0011);
-    wire [32:0] alu_ext_b = {1'b0, alu_a_b} + {1'b0, alu_do_sub_b ? ~alu_b_b : alu_b_b} + {32'b0, alu_do_sub_b};
-    wire [31:0] alu_sum_b   = alu_ext_b[31:0];
-    wire        alu_carry_b = alu_ext_b[32];
-    wire        alu_lt_b    = (alu_a_b[31] != alu_b_b[31]) ? alu_a_b[31] : alu_sum_b[31];
-    wire        alu_ltu_b   = !alu_carry_b;
-
-    logic [31:0] alu_result_b;
-    always_comb begin
-        case (idex_alu_op_b)
-            4'b0000, 4'b1000: alu_result_b = alu_sum_b;
-            4'b0010:          alu_result_b = {31'b0, alu_lt_b};
-            4'b0011:          alu_result_b = {31'b0, alu_ltu_b};
-            4'b0100:          alu_result_b = alu_a_b ^ alu_b_b;
-            4'b0110:          alu_result_b = alu_a_b | alu_b_b;
-            4'b0111:          alu_result_b = alu_a_b & alu_b_b;
-            default:          alu_result_b = alu_sum_b;
-        endcase
-    end
-
-    // Slot B: no branch/redirect (control flow restricted to slot A)
-    wire [31:0] ex_result_b = alu_result_b;
+    // ALU phase stall: when phase 0 has valid B, need 1 extra cycle for phase 1
+    wire stall_alu_phase = idex_valid_a && idex_valid_b && !ex_phase && !stall_muldiv;
 
     // ================================================================
     // Pipeline control
@@ -793,7 +788,7 @@ module rv32i_core #(
 
     wire stall_muldiv = idex_valid_a && (idex_is_muldiv_a || idex_is_shift_a) && !md_ready;
     wire stall_load   = load_use;
-    wire flush      = redirect || (idex_valid_a && (idex_is_trap_a || idex_is_halt_a));
+    wire flush      = redirect || (idex_valid_a && !in_phase_b && (idex_is_trap_a || idex_is_halt_a));
 
     // Stall when ID-stage instruction depends on EXMEM_A (would need MEMWB forwarding)
     // By stalling, the producer completes WB before consumer reaches EX, so RF has the value.
@@ -802,7 +797,7 @@ module rv32i_core #(
     wire stall_exmem_dep = !flush && exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && ifid_valid_a &&
         ((id_uses_rs1_a && exmem_rd_a == id_rs1_a) || (id_uses_rs2_a && exmem_rd_a == id_rs2_a));
 
-    wire stall_pipe   = stall_muldiv || stall_load || stall_exmem_dep;
+    wire stall_pipe   = stall_muldiv || stall_load || stall_exmem_dep || stall_alu_phase;
 
     wire halted = halt_o || trap_o;
 
@@ -918,6 +913,7 @@ module rv32i_core #(
             halt_o          <= 1'b0;
             md_active       <= 1'b0;
             resv_valid      <= 1'b0;
+            ex_phase        <= 1'b0;
         end else if (halted) begin
             // frozen
         end else begin
@@ -931,13 +927,24 @@ module rv32i_core #(
             if (exmem_valid_a && exmem_is_trap_a) trap_o <= 1'b1;
             if (exmem_valid_a && exmem_is_halt_a) halt_o <= 1'b1;
 
+            // ---- ALU phase control ----
+            if (flush) begin
+                ex_phase <= 1'b0;
+            end else if (stall_alu_phase) begin
+                ex_phase <= 1'b1;
+                ex_result_a_saved <= ex_result_a;
+            end else begin
+                ex_phase <= 1'b0;
+            end
+
             // ---- EX/MEM ----
-            if (stall_muldiv) begin
+            if (stall_muldiv || stall_alu_phase) begin
                 exmem_valid_a <= 1'b0;
                 exmem_valid_b <= 1'b0;
             end else begin
                 exmem_valid_a     <= idex_valid_a;
-                exmem_result_a    <= (idex_wb_sel_a == WB_PC4) ? ex_pc4_a : ex_result_a;
+                exmem_result_a    <= (idex_wb_sel_a == WB_PC4) ? ex_pc4_a :
+                                     (ex_phase ? ex_result_a_saved : ex_result_a);
                 exmem_rs2_val_a   <= fwd_rs2_a;
                 exmem_rd_a        <= idex_rd_a;
                 exmem_funct3_a    <= idex_funct3_a;
@@ -956,7 +963,7 @@ module rv32i_core #(
             end
 
             // ---- ID/EX ----
-            if (stall_muldiv) begin
+            if (stall_muldiv || stall_alu_phase) begin
                 // hold
             end else if (flush || stall_load || stall_exmem_dep) begin
                 idex_valid_a <= 1'b0;
