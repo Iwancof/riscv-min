@@ -106,6 +106,10 @@ class Memory {
                (uint32_t{bytes_[base + 2]} << 16) | (uint32_t{bytes_[base + 3]} << 24);
     }
 
+    uint64_t read_dword(uint32_t addr) const {
+        return uint64_t{read_word(addr)} | (uint64_t{read_word(addr + 4)} << 32);
+    }
+
     bool write_word(uint32_t addr, uint32_t data, uint8_t strobe) {
         const uint32_t base = addr & ~uint32_t{3};
         if (base + 3 >= bytes_.size()) {
@@ -176,10 +180,10 @@ int main(int argc, char **argv) {
     };
 
     auto settle = [&]() {
-        top.imem_rdata_i = mem.read_word(top.imem_addr_o);
+        top.imem_rdata_i = mem.read_dword(top.imem_addr_o);
         top.dmem_rdata_i = mem.read_word(top.dmem_addr_o);
         top.eval();
-        top.imem_rdata_i = mem.read_word(top.imem_addr_o);
+        top.imem_rdata_i = mem.read_dword(top.imem_addr_o);
         top.dmem_rdata_i = mem.read_word(top.dmem_addr_o);
         top.eval();
     };

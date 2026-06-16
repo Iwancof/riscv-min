@@ -4,7 +4,7 @@ module rv32i_core #(
     input  logic        clk,
     input  logic        rst_n,
     output logic [31:0] imem_addr_o,
-    input  logic [31:0] imem_rdata_i,
+    input  logic [63:0] imem_rdata_i,   // 64 bits = 2 consecutive words
     output logic [31:0] dmem_addr_o,
     output logic [31:0] dmem_wdata_o,
     output logic [3:0]  dmem_wstrb_o,
@@ -31,42 +31,62 @@ module rv32i_core #(
     logic [31:0] regs [1:31];
 
     // ================================================================
-    // Pipeline registers
+    // Pipeline registers -- dual slots (A = older, B = younger)
     // ================================================================
     // --- IF/ID ---
-    logic [31:0] ifid_pc, ifid_instr;
-    logic        ifid_valid;
-    logic        ifid_compressed; // was this a compressed instruction? (PC+2 vs PC+4)
+    logic [31:0] ifid_pc_a, ifid_instr_a;
+    logic        ifid_valid_a, ifid_compressed_a;
+    logic [31:0] ifid_pc_b, ifid_instr_b;
+    logic        ifid_valid_b, ifid_compressed_b;
 
     // --- ID/EX ---
-    logic [31:0] idex_pc, idex_rs1_val, idex_rs2_val, idex_imm;
-    logic [4:0]  idex_rd, idex_rs1, idex_rs2;
-    logic [3:0]  idex_alu_op;
-    logic [2:0]  idex_funct3;
-    logic        idex_alu_src_imm, idex_alu_src_pc;
-    logic        idex_mem_read, idex_mem_write, idex_rd_we;
-    logic        idex_is_branch, idex_is_jal, idex_is_jalr;
-    logic        idex_is_muldiv, idex_is_halt, idex_is_trap;
-    logic        idex_is_amo, idex_is_lr, idex_is_sc;
-    logic [4:0]  idex_amo_funct5;
-    logic [1:0]  idex_wb_sel;
-    logic        idex_valid;
-    logic        idex_compressed;
+    logic [31:0] idex_pc_a, idex_rs1_val_a, idex_rs2_val_a, idex_imm_a;
+    logic [4:0]  idex_rd_a, idex_rs1_a, idex_rs2_a;
+    logic [3:0]  idex_alu_op_a;
+    logic [2:0]  idex_funct3_a;
+    logic        idex_alu_src_imm_a, idex_alu_src_pc_a;
+    logic        idex_mem_read_a, idex_mem_write_a, idex_rd_we_a;
+    logic        idex_is_branch_a, idex_is_jal_a, idex_is_jalr_a;
+    logic        idex_is_muldiv_a, idex_is_halt_a, idex_is_trap_a;
+    logic        idex_is_amo_a, idex_is_lr_a, idex_is_sc_a;
+    logic [4:0]  idex_amo_funct5_a;
+    logic [1:0]  idex_wb_sel_a;
+    logic        idex_valid_a, idex_compressed_a;
+
+    logic [31:0] idex_pc_b, idex_rs1_val_b, idex_rs2_val_b, idex_imm_b;
+    logic [4:0]  idex_rd_b, idex_rs1_b, idex_rs2_b;
+    logic [3:0]  idex_alu_op_b;
+    logic [2:0]  idex_funct3_b;
+    logic        idex_alu_src_imm_b, idex_alu_src_pc_b;
+    logic        idex_rd_we_b;
+    logic        idex_is_branch_b, idex_is_jal_b, idex_is_jalr_b;
+    logic [1:0]  idex_wb_sel_b;
+    logic        idex_valid_b, idex_compressed_b;
 
     // --- EX/MEM ---
-    logic [31:0] exmem_result, exmem_rs2_val, exmem_pc4;
-    logic [4:0]  exmem_rd;
-    logic [2:0]  exmem_funct3;
-    logic        exmem_rd_we, exmem_mem_read, exmem_mem_write;
-    logic        exmem_is_amo, exmem_is_lr, exmem_is_sc;
-    logic [4:0]  exmem_amo_funct5;
-    logic [1:0]  exmem_wb_sel;
-    logic        exmem_is_halt, exmem_is_trap, exmem_valid;
+    logic [31:0] exmem_result_a, exmem_rs2_val_a, exmem_pc4_a;
+    logic [4:0]  exmem_rd_a;
+    logic [2:0]  exmem_funct3_a;
+    logic        exmem_rd_we_a, exmem_mem_read_a, exmem_mem_write_a;
+    logic        exmem_is_amo_a, exmem_is_lr_a, exmem_is_sc_a;
+    logic [4:0]  exmem_amo_funct5_a;
+    logic [1:0]  exmem_wb_sel_a;
+    logic        exmem_is_halt_a, exmem_is_trap_a, exmem_valid_a;
+
+    logic [31:0] exmem_result_b, exmem_pc4_b;
+    logic [4:0]  exmem_rd_b;
+    logic        exmem_rd_we_b;
+    logic [1:0]  exmem_wb_sel_b;
+    logic        exmem_valid_b;
 
     // --- MEM/WB ---
-    logic [31:0] memwb_rd_data;
-    logic [4:0]  memwb_rd;
-    logic        memwb_rd_we, memwb_is_halt, memwb_is_trap, memwb_valid;
+    logic [31:0] memwb_rd_data_a;
+    logic [4:0]  memwb_rd_a;
+    logic        memwb_rd_we_a, memwb_is_halt_a, memwb_is_trap_a, memwb_valid_a;
+
+    logic [31:0] memwb_rd_data_b;
+    logic [4:0]  memwb_rd_b;
+    logic        memwb_rd_we_b, memwb_valid_b;
 
     // ================================================================
     // Divider state
@@ -81,53 +101,49 @@ module rv32i_core #(
     wire        div_ready = div_active && (div_cnt == 6'd0);
 
     // ================================================================
-    // A extension — LR/SC reservation set
+    // A extension -- LR/SC reservation set
     // ================================================================
     logic [31:0] resv_addr;
     logic        resv_valid;
 
     // ================================================================
-    // RV32C Decompressor — map 16-bit compressed instructions to 32-bit
+    // RV32C Decompressor
     // ================================================================
     function automatic [31:0] decompress(input [15:0] ci);
-        // Pre-declare all temporaries at function scope (Verilator-compatible)
         logic [31:0] out;
-        logic [4:0]  rd_c, rs1_c, rs2_c;  // compact register decoded
-        logic [4:0]  rd_f, rs2_f;          // full-range register
+        logic [4:0]  rd_c, rs1_c, rs2_c;
+        logic [4:0]  rd_f, rs2_f;
         logic [4:0]  shamt;
         logic [5:0]  imm6;
         logic [6:0]  off7;
         logic [7:0]  off8;
-        logic [8:0]  off9;
         logic [9:0]  nzuimm10;
         logic [11:0] imm12;
-        logic [10:0] joff11;   // C.J/C.JAL offset[11:1] (11 bits, bit 0 implicit)
+        logic [10:0] joff11;
         logic [12:0] bimm13;
         logic [20:0] jimm21;
+        logic [8:0]  off9;
 
-        out = 32'h0000_0000; // default: illegal
+        out = 32'h0000_0000;
 
         case (ci[1:0])
-        // ============================================================
-        // Quadrant 0
-        // ============================================================
         2'b00: begin
             rd_c  = {2'b01, ci[4:2]};
             rs1_c = {2'b01, ci[9:7]};
             rs2_c = {2'b01, ci[4:2]};
             case (ci[15:13])
-            3'b000: begin // C.ADDI4SPN
+            3'b000: begin
                 nzuimm10 = {ci[10:7], ci[12:11], ci[5], ci[6], 2'b00};
                 if (nzuimm10 != 10'd0) begin
                     imm12 = {2'b0, nzuimm10};
                     out = {imm12, 5'd2, 3'b000, rd_c, 7'b0010011};
                 end
             end
-            3'b010: begin // C.LW
+            3'b010: begin
                 off7 = {ci[5], ci[12:10], ci[6], 2'b00};
                 out = {5'b0, off7, rs1_c, 3'b010, rd_c, 7'b0000011};
             end
-            3'b110: begin // C.SW
+            3'b110: begin
                 off7 = {ci[5], ci[12:10], ci[6], 2'b00};
                 out = {5'b0, off7[6:5], rs2_c, rs1_c, 3'b010, off7[4:0], 7'b0100011};
             end
@@ -135,9 +151,6 @@ module rv32i_core #(
             endcase
         end
 
-        // ============================================================
-        // Quadrant 1
-        // ============================================================
         2'b01: begin
             rd_c  = {2'b01, ci[9:7]};
             rs2_c = {2'b01, ci[4:2]};
@@ -145,20 +158,20 @@ module rv32i_core #(
             imm6  = {ci[12], ci[6:2]};
 
             case (ci[15:13])
-            3'b000: begin // C.NOP / C.ADDI
+            3'b000: begin
                 imm12 = {{6{imm6[5]}}, imm6};
                 out = {imm12, rd_f, 3'b000, rd_f, 7'b0010011};
             end
-            3'b001: begin // C.JAL (RV32)
+            3'b001: begin
                 joff11 = {ci[12], ci[8], ci[10:9], ci[6], ci[7], ci[2], ci[11], ci[5:3]};
                 jimm21 = {{9{joff11[10]}}, joff11, 1'b0};
                 out = {jimm21[20], jimm21[10:1], jimm21[11], jimm21[19:12], 5'd1, 7'b1101111};
             end
-            3'b010: begin // C.LI
+            3'b010: begin
                 imm12 = {{6{imm6[5]}}, imm6};
                 out = {imm12, 5'd0, 3'b000, rd_f, 7'b0010011};
             end
-            3'b011: begin // C.ADDI16SP / C.LUI
+            3'b011: begin
                 if (rd_f == 5'd2) begin
                     nzuimm10 = {ci[12], ci[4:3], ci[5], ci[2], ci[6], 4'b0000};
                     imm12 = {{2{nzuimm10[9]}}, nzuimm10};
@@ -169,42 +182,42 @@ module rv32i_core #(
                     out[6:0]  = 7'b0110111;
                 end
             end
-            3'b100: begin // ALU group
+            3'b100: begin
                 case (ci[11:10])
-                2'b00: begin // C.SRLI
+                2'b00: begin
                     shamt = ci[6:2];
                     out = {7'b0000000, shamt, rd_c, 3'b101, rd_c, 7'b0010011};
                 end
-                2'b01: begin // C.SRAI
+                2'b01: begin
                     shamt = ci[6:2];
                     out = {7'b0100000, shamt, rd_c, 3'b101, rd_c, 7'b0010011};
                 end
-                2'b10: begin // C.ANDI
+                2'b10: begin
                     imm12 = {{6{imm6[5]}}, imm6};
                     out = {imm12, rd_c, 3'b111, rd_c, 7'b0010011};
                 end
-                2'b11: begin // register-register
+                2'b11: begin
                     case ({ci[12], ci[6:5]})
-                    3'b000: out = {7'b0100000, rs2_c, rd_c, 3'b000, rd_c, 7'b0110011}; // SUB
-                    3'b001: out = {7'b0000000, rs2_c, rd_c, 3'b100, rd_c, 7'b0110011}; // XOR
-                    3'b010: out = {7'b0000000, rs2_c, rd_c, 3'b110, rd_c, 7'b0110011}; // OR
-                    3'b011: out = {7'b0000000, rs2_c, rd_c, 3'b111, rd_c, 7'b0110011}; // AND
+                    3'b000: out = {7'b0100000, rs2_c, rd_c, 3'b000, rd_c, 7'b0110011};
+                    3'b001: out = {7'b0000000, rs2_c, rd_c, 3'b100, rd_c, 7'b0110011};
+                    3'b010: out = {7'b0000000, rs2_c, rd_c, 3'b110, rd_c, 7'b0110011};
+                    3'b011: out = {7'b0000000, rs2_c, rd_c, 3'b111, rd_c, 7'b0110011};
                     default: ;
                     endcase
                 end
                 endcase
             end
-            3'b101: begin // C.J
+            3'b101: begin
                 joff11 = {ci[12], ci[8], ci[10:9], ci[6], ci[7], ci[2], ci[11], ci[5:3]};
                 jimm21 = {{9{joff11[10]}}, joff11, 1'b0};
                 out = {jimm21[20], jimm21[10:1], jimm21[11], jimm21[19:12], 5'd0, 7'b1101111};
             end
-            3'b110: begin // C.BEQZ
+            3'b110: begin
                 off9 = {ci[12], ci[6:5], ci[2], ci[11:10], ci[4:3], 1'b0};
                 bimm13 = {{4{off9[8]}}, off9};
                 out = {bimm13[12], bimm13[10:5], 5'd0, rd_c, 3'b000, bimm13[4:1], bimm13[11], 7'b1100011};
             end
-            3'b111: begin // C.BNEZ
+            3'b111: begin
                 off9 = {ci[12], ci[6:5], ci[2], ci[11:10], ci[4:3], 1'b0};
                 bimm13 = {{4{off9[8]}}, off9};
                 out = {bimm13[12], bimm13[10:5], 5'd0, rd_c, 3'b001, bimm13[4:1], bimm13[11], 7'b1100011};
@@ -212,43 +225,40 @@ module rv32i_core #(
             endcase
         end
 
-        // ============================================================
-        // Quadrant 2
-        // ============================================================
         2'b10: begin
             rd_f  = ci[11:7];
             rs2_f = ci[6:2];
             case (ci[15:13])
-            3'b000: begin // C.SLLI
+            3'b000: begin
                 shamt = ci[6:2];
                 if (rd_f != 5'd0)
                     out = {7'b0000000, shamt, rd_f, 3'b001, rd_f, 7'b0010011};
             end
-            3'b010: begin // C.LWSP
+            3'b010: begin
                 off8 = {ci[3:2], ci[12], ci[6:4], 2'b00};
                 if (rd_f != 5'd0)
                     out = {4'b0, off8, 5'd2, 3'b010, rd_f, 7'b0000011};
             end
-            3'b100: begin // C.JR / C.MV / C.EBREAK / C.JALR / C.ADD
+            3'b100: begin
                 if (ci[12] == 1'b0) begin
-                    if (rs2_f == 5'd0) begin // C.JR
+                    if (rs2_f == 5'd0) begin
                         if (rd_f != 5'd0)
                             out = {12'b0, rd_f, 3'b000, 5'd0, 7'b1100111};
-                    end else begin // C.MV
+                    end else begin
                         out = {7'b0000000, rs2_f, 5'd0, 3'b000, rd_f, 7'b0110011};
                     end
                 end else begin
                     if (rs2_f == 5'd0) begin
-                        if (rd_f == 5'd0) // C.EBREAK
+                        if (rd_f == 5'd0)
                             out = 32'h00100073;
-                        else // C.JALR
+                        else
                             out = {12'b0, rd_f, 3'b000, 5'd1, 7'b1100111};
-                    end else begin // C.ADD
+                    end else begin
                         out = {7'b0000000, rs2_f, rd_f, 3'b000, rd_f, 7'b0110011};
                     end
                 end
             end
-            3'b110: begin // C.SWSP
+            3'b110: begin
                 off8 = {ci[8:7], ci[12:9], 2'b00};
                 out = {4'b0, off8[7:5], rs2_f, 5'd2, 3'b010, off8[4:0], 7'b0100011};
             end
@@ -256,342 +266,582 @@ module rv32i_core #(
             endcase
         end
 
-        default: ; // ci[1:0]==11 should never be called
+        default: ;
         endcase
 
         decompress = out;
     endfunction
 
     // ================================================================
-    // IF stage — supports 2-byte aligned PC with half-word buffer
+    // IF stage -- Dual fetch from 64-bit window
     // ================================================================
     logic [31:0] pc_q;
-    logic [15:0] hwbuf;        // half-word buffer for cross-boundary 32-bit instrs
-    logic        hwbuf_valid;  // hwbuf holds lower 16 bits of a spanning instr
 
-    // Always word-aligned memory access
     assign imem_addr_o = {pc_q[31:2], 2'b00};
     assign pc_o        = pc_q;
 
-    // IF stage fetch / decompress logic
-    logic [31:0] if_instr;     // decoded 32-bit instruction
-    logic        if_is_compressed;
-    logic        if_stall_xword; // stall for cross-word-boundary fetch
+    // Pre-extract halfwords and words from the 64-bit window
+    wire [15:0] hw_at_0 = imem_rdata_i[15:0];
+    wire [15:0] hw_at_2 = imem_rdata_i[31:16];
+    wire [15:0] hw_at_4 = imem_rdata_i[47:32];
+    wire [15:0] hw_at_6 = imem_rdata_i[63:48];
+
+    wire [31:0] word_at_0 = imem_rdata_i[31:0];
+    wire [31:0] word_at_2 = imem_rdata_i[47:16];
+    wire [31:0] word_at_4 = imem_rdata_i[63:32];
+
+    // Instruction A: halfword and word at PC's position in window
+    wire [15:0] if_hw_a = pc_q[1] ? hw_at_2 : hw_at_0;
+    wire [31:0] if_word_a = pc_q[1] ? word_at_2 : word_at_0;
+
+    // Decode instruction A (always valid since pc is always 2-byte aligned and fits in window)
+    logic [31:0] if_instr_a;
+    logic        if_compressed_a;
+    logic [31:0] if_next_pc;  // PC of instruction B
+
+    // Decode instruction B
+    logic [31:0] if_instr_b;
+    logic        if_compressed_b;
+    logic        if_valid_b;
+
+    // Instruction A is always fetchable (PC is 2-byte aligned, window is 8 bytes)
+    wire         if_valid_a = 1'b1;
 
     always_comb begin
-        if_instr        = 32'h0000_0013; // NOP default
-        if_is_compressed = 1'b0;
-        if_stall_xword  = 1'b0;
+        if_instr_a      = 32'h0000_0013;
+        if_compressed_a = 1'b0;
+        if_next_pc      = pc_q;
+        if_instr_b      = 32'h0000_0013;
+        if_compressed_b = 1'b0;
+        if_valid_b      = 1'b0;
 
-        if (hwbuf_valid) begin
-            // We have the lower 16 bits buffered from last cycle;
-            // upper half of current word provides upper 16 bits
-            if_instr = {imem_rdata_i[15:0], hwbuf};
-            if_is_compressed = 1'b0; // it's a full 32-bit instruction
-        end else if (pc_q[1] == 1'b0) begin
-            // PC is word-aligned: instruction at bits [15:0] or [31:0]
-            if (imem_rdata_i[1:0] != 2'b11) begin
-                // Compressed instruction in lower half
-                if_instr = decompress(imem_rdata_i[15:0]);
-                if_is_compressed = 1'b1;
+        // Instruction A decode
+        if (if_hw_a[1:0] != 2'b11) begin
+            if_instr_a = decompress(if_hw_a);
+            if_compressed_a = 1'b1;
+            if_next_pc = pc_q + 32'd2;
+        end else begin
+            if_instr_a = if_word_a;
+            if_compressed_a = 1'b0;
+            if_next_pc = pc_q + 32'd4;
+        end
+
+        // Instruction B decode (depends on where A ends)
+        // pc_q[1]=0, A compressed  -> B at offset 2 in window
+        // pc_q[1]=0, A 32-bit      -> B at offset 4 in window
+        // pc_q[1]=1, A compressed  -> B at offset 4 in window
+        // pc_q[1]=1, A 32-bit      -> B at offset 6 in window
+        if (!pc_q[1] && if_hw_a[1:0] != 2'b11) begin
+            // B at offset 2
+            if (hw_at_2[1:0] != 2'b11) begin
+                if_instr_b = decompress(hw_at_2);
+                if_compressed_b = 1'b1;
+                if_valid_b = 1'b1;
             end else begin
-                // Full 32-bit instruction, entirely within this word
-                if_instr = imem_rdata_i;
-                if_is_compressed = 1'b0;
+                if_instr_b = word_at_2;
+                if_compressed_b = 1'b0;
+                if_valid_b = 1'b1;
+            end
+        end else if ((!pc_q[1] && if_hw_a[1:0] == 2'b11) ||
+                     ( pc_q[1] && if_hw_a[1:0] != 2'b11)) begin
+            // B at offset 4
+            if (hw_at_4[1:0] != 2'b11) begin
+                if_instr_b = decompress(hw_at_4);
+                if_compressed_b = 1'b1;
+                if_valid_b = 1'b1;
+            end else begin
+                if_instr_b = word_at_4;
+                if_compressed_b = 1'b0;
+                if_valid_b = 1'b1;
             end
         end else begin
-            // PC is halfword-aligned: instruction at bits [31:16]
-            if (imem_rdata_i[17:16] != 2'b11) begin
-                // Compressed instruction in upper half
-                if_instr = decompress(imem_rdata_i[31:16]);
-                if_is_compressed = 1'b1;
-            end else begin
-                // 32-bit instruction crosses word boundary → need next word
-                // Stall this cycle; buffer the lower 16 bits
-                if_stall_xword = 1'b1;
-                if_instr = 32'h0000_0013; // NOP placeholder (won't be used)
-                if_is_compressed = 1'b0;
+            // B at offset 6 -- only compressed fits
+            if (hw_at_6[1:0] != 2'b11) begin
+                if_instr_b = decompress(hw_at_6);
+                if_compressed_b = 1'b1;
+                if_valid_b = 1'b1;
             end
+            // else B doesn't fit, if_valid_b stays 0
         end
     end
 
-    // ================================================================
-    // ID stage — decode
-    // ================================================================
-    wire [6:0] id_opcode = ifid_instr[6:0];
-    wire [4:0] id_rd     = ifid_instr[11:7];
-    wire [2:0] id_funct3 = ifid_instr[14:12];
-    wire       id_f7b5   = ifid_instr[30];
-    wire [6:0] id_funct7 = ifid_instr[31:25];
+    wire [31:0] if_pc_after_b = if_next_pc + (if_compressed_b ? 32'd2 : 32'd4);
 
-    logic [4:0] id_rs1, id_rs2;
+    // ================================================================
+    // Held instruction buffer -- for when slot B can't dual-issue
+    // ================================================================
+    logic [31:0] held_pc, held_instr;
+    logic        held_valid, held_compressed;
+
+    // ================================================================
+    // Decode helpers for a generic instruction
+    // ================================================================
+
+    // Slot A decode
+    wire [6:0] id_opcode_a = ifid_instr_a[6:0];
+    wire [4:0] id_rd_a     = ifid_instr_a[11:7];
+    wire [2:0] id_funct3_a = ifid_instr_a[14:12];
+    wire       id_f7b5_a   = ifid_instr_a[30];
+    wire [6:0] id_funct7_a = ifid_instr_a[31:25];
+
+    logic [4:0] id_rs1_a, id_rs2_a;
     always_comb begin
-        id_rs1 = ifid_instr[19:15];
-        id_rs2 = ifid_instr[24:20];
-        case (id_opcode)
-            OP_LUI, OP_AUIPC, OP_JAL: begin id_rs1 = 5'd0; id_rs2 = 5'd0; end
-            OP_JALR, OP_LOAD, OP_IMM:  id_rs2 = 5'd0;
+        id_rs1_a = ifid_instr_a[19:15];
+        id_rs2_a = ifid_instr_a[24:20];
+        case (id_opcode_a)
+            OP_LUI, OP_AUIPC, OP_JAL: begin id_rs1_a = 5'd0; id_rs2_a = 5'd0; end
+            OP_JALR, OP_LOAD, OP_IMM:  id_rs2_a = 5'd0;
             default: ;
         endcase
     end
 
-    // Immediates
-    wire [31:0] imm_i = {{20{ifid_instr[31]}}, ifid_instr[31:20]};
-    wire [31:0] imm_s = {{20{ifid_instr[31]}}, ifid_instr[31:25], ifid_instr[11:7]};
-    wire [31:0] imm_b = {{19{ifid_instr[31]}}, ifid_instr[31], ifid_instr[7],
-                          ifid_instr[30:25], ifid_instr[11:8], 1'b0};
-    wire [31:0] imm_u = {ifid_instr[31:12], 12'b0};
-    wire [31:0] imm_j = {{11{ifid_instr[31]}}, ifid_instr[31], ifid_instr[19:12],
-                          ifid_instr[20], ifid_instr[30:21], 1'b0};
+    wire [31:0] imm_i_a = {{20{ifid_instr_a[31]}}, ifid_instr_a[31:20]};
+    wire [31:0] imm_s_a = {{20{ifid_instr_a[31]}}, ifid_instr_a[31:25], ifid_instr_a[11:7]};
+    wire [31:0] imm_b_a = {{19{ifid_instr_a[31]}}, ifid_instr_a[31], ifid_instr_a[7],
+                            ifid_instr_a[30:25], ifid_instr_a[11:8], 1'b0};
+    wire [31:0] imm_u_a = {ifid_instr_a[31:12], 12'b0};
+    wire [31:0] imm_j_a = {{11{ifid_instr_a[31]}}, ifid_instr_a[31], ifid_instr_a[19:12],
+                            ifid_instr_a[20], ifid_instr_a[30:21], 1'b0};
 
-    logic [31:0] id_imm;
+    logic [31:0] id_imm_a;
     always_comb begin
-        case (id_opcode)
-            OP_LUI, OP_AUIPC:         id_imm = imm_u;
-            OP_JAL:                    id_imm = imm_j;
-            OP_BRANCH:                 id_imm = imm_b;
-            OP_STORE:                  id_imm = imm_s;
-            OP_AMO:                    id_imm = 32'b0;
-            default:                   id_imm = imm_i;
+        case (id_opcode_a)
+            OP_LUI, OP_AUIPC:         id_imm_a = imm_u_a;
+            OP_JAL:                    id_imm_a = imm_j_a;
+            OP_BRANCH:                 id_imm_a = imm_b_a;
+            OP_STORE:                  id_imm_a = imm_s_a;
+            OP_AMO:                    id_imm_a = 32'b0;
+            default:                   id_imm_a = imm_i_a;
         endcase
     end
 
-    // Control signals
-    logic [3:0]  id_alu_op;
-    logic        id_alu_src_imm, id_alu_src_pc;
-    logic        id_mem_read, id_mem_write, id_rd_we;
-    logic        id_is_branch, id_is_jal, id_is_jalr;
-    logic        id_is_muldiv, id_is_halt, id_is_trap;
-    logic        id_is_amo, id_is_lr, id_is_sc;
-    logic [4:0]  id_amo_funct5;
-    logic [1:0]  id_wb_sel;
+    logic [3:0]  id_alu_op_a;
+    logic        id_alu_src_imm_a, id_alu_src_pc_a;
+    logic        id_mem_read_a, id_mem_write_a, id_rd_we_a;
+    logic        id_is_branch_a, id_is_jal_a, id_is_jalr_a;
+    logic        id_is_muldiv_a, id_is_halt_a, id_is_trap_a;
+    logic        id_is_amo_a, id_is_lr_a, id_is_sc_a;
+    logic [4:0]  id_amo_funct5_a;
+    logic [1:0]  id_wb_sel_a;
 
     always_comb begin
-        id_alu_op      = 4'b0000;
-        id_alu_src_imm = 1'b0;
-        id_alu_src_pc  = 1'b0;
-        id_mem_read    = 1'b0;
-        id_mem_write   = 1'b0;
-        id_rd_we       = 1'b0;
-        id_is_branch   = 1'b0;
-        id_is_jal      = 1'b0;
-        id_is_jalr     = 1'b0;
-        id_is_muldiv   = 1'b0;
-        id_is_halt     = 1'b0;
-        id_is_trap     = 1'b0;
-        id_is_amo      = 1'b0;
-        id_is_lr       = 1'b0;
-        id_is_sc       = 1'b0;
-        id_amo_funct5  = 5'b0;
-        id_wb_sel      = WB_EX;
+        id_alu_op_a      = 4'b0000;
+        id_alu_src_imm_a = 1'b0;
+        id_alu_src_pc_a  = 1'b0;
+        id_mem_read_a    = 1'b0;
+        id_mem_write_a   = 1'b0;
+        id_rd_we_a       = 1'b0;
+        id_is_branch_a   = 1'b0;
+        id_is_jal_a      = 1'b0;
+        id_is_jalr_a     = 1'b0;
+        id_is_muldiv_a   = 1'b0;
+        id_is_halt_a     = 1'b0;
+        id_is_trap_a     = 1'b0;
+        id_is_amo_a      = 1'b0;
+        id_is_lr_a       = 1'b0;
+        id_is_sc_a       = 1'b0;
+        id_amo_funct5_a  = 5'b0;
+        id_wb_sel_a      = WB_EX;
 
-        case (id_opcode)
-            OP_LUI: begin
-                id_alu_src_imm = 1'b1;
-                id_rd_we       = 1'b1;
-            end
-            OP_AUIPC: begin
-                id_alu_src_imm = 1'b1;
-                id_alu_src_pc  = 1'b1;
-                id_rd_we       = 1'b1;
-            end
-            OP_JAL: begin
-                id_is_jal = 1'b1;
-                id_rd_we  = 1'b1;
-                id_wb_sel = WB_PC4;
-            end
-            OP_JALR: begin
-                id_alu_src_imm = 1'b1;
-                id_is_jalr     = 1'b1;
-                id_rd_we       = 1'b1;
-                id_wb_sel      = WB_PC4;
-            end
-            OP_BRANCH: begin
-                id_alu_op    = 4'b1000;
-                id_is_branch = 1'b1;
-            end
-            OP_LOAD: begin
-                id_alu_src_imm = 1'b1;
-                id_mem_read    = 1'b1;
-                id_rd_we       = 1'b1;
-                id_wb_sel      = WB_MEM;
-            end
-            OP_STORE: begin
-                id_alu_src_imm = 1'b1;
-                id_mem_write   = 1'b1;
-            end
-            OP_IMM: begin
-                id_alu_op      = (id_funct3 == 3'b101) ? {id_f7b5, id_funct3} : {1'b0, id_funct3};
-                id_alu_src_imm = 1'b1;
-                id_rd_we       = 1'b1;
+        case (id_opcode_a)
+            OP_LUI:    begin id_alu_src_imm_a = 1'b1; id_rd_we_a = 1'b1; end
+            OP_AUIPC:  begin id_alu_src_imm_a = 1'b1; id_alu_src_pc_a = 1'b1; id_rd_we_a = 1'b1; end
+            OP_JAL:    begin id_is_jal_a = 1'b1; id_rd_we_a = 1'b1; id_wb_sel_a = WB_PC4; end
+            OP_JALR:   begin id_alu_src_imm_a = 1'b1; id_is_jalr_a = 1'b1; id_rd_we_a = 1'b1; id_wb_sel_a = WB_PC4; end
+            OP_BRANCH: begin id_alu_op_a = 4'b1000; id_is_branch_a = 1'b1; end
+            OP_LOAD:   begin id_alu_src_imm_a = 1'b1; id_mem_read_a = 1'b1; id_rd_we_a = 1'b1; id_wb_sel_a = WB_MEM; end
+            OP_STORE:  begin id_alu_src_imm_a = 1'b1; id_mem_write_a = 1'b1; end
+            OP_IMM:    begin
+                id_alu_op_a = (id_funct3_a == 3'b101) ? {id_f7b5_a, id_funct3_a} : {1'b0, id_funct3_a};
+                id_alu_src_imm_a = 1'b1; id_rd_we_a = 1'b1;
             end
             OP_REG: begin
-                if (id_funct7 == 7'b0000001) begin
-                    id_is_muldiv = 1'b1;
-                    id_rd_we     = 1'b1;
+                if (id_funct7_a == 7'b0000001) begin
+                    id_is_muldiv_a = 1'b1; id_rd_we_a = 1'b1;
                 end else begin
-                    id_alu_op = {id_f7b5, id_funct3};
-                    id_rd_we  = 1'b1;
+                    id_alu_op_a = {id_f7b5_a, id_funct3_a}; id_rd_we_a = 1'b1;
                 end
             end
             OP_AMO: begin
-                id_rd_we       = 1'b1;
-                id_mem_read    = 1'b1;
-                id_alu_src_imm = 1'b1;
-                id_wb_sel      = WB_MEM;
-                id_amo_funct5  = ifid_instr[31:27];
-                if (ifid_instr[31:27] == 5'b00010) begin
-                    id_is_lr = 1'b1;
-                end else if (ifid_instr[31:27] == 5'b00011) begin
-                    id_is_sc    = 1'b1;
-                    id_mem_write = 1'b1;
-                    id_wb_sel   = WB_EX;
+                id_rd_we_a = 1'b1; id_mem_read_a = 1'b1; id_alu_src_imm_a = 1'b1; id_wb_sel_a = WB_MEM;
+                id_amo_funct5_a = ifid_instr_a[31:27];
+                if (ifid_instr_a[31:27] == 5'b00010) begin
+                    id_is_lr_a = 1'b1;
+                end else if (ifid_instr_a[31:27] == 5'b00011) begin
+                    id_is_sc_a = 1'b1; id_mem_write_a = 1'b1; id_wb_sel_a = WB_EX;
                 end else begin
-                    id_is_amo    = 1'b1;
-                    id_mem_write = 1'b1;
+                    id_is_amo_a = 1'b1; id_mem_write_a = 1'b1;
                 end
             end
-            OP_FENCE: ; // NOP
+            OP_FENCE: ;
             OP_SYSTEM: begin
-                if (ifid_instr == 32'h00100073)
-                    id_is_halt = 1'b1;
-                else
-                    id_is_trap = 1'b1;
+                if (ifid_instr_a == 32'h00100073) id_is_halt_a = 1'b1;
+                else id_is_trap_a = 1'b1;
             end
-            default: id_is_trap = 1'b1;
+            default: id_is_trap_a = 1'b1;
         endcase
     end
 
-    // Register file read with WB write-through
-    wire [31:0] rf_rs1 = (id_rs1 == 5'd0) ? 32'b0 : regs[id_rs1];
-    wire [31:0] rf_rs2 = (id_rs2 == 5'd0) ? 32'b0 : regs[id_rs2];
+    // Slot B decode
+    wire [6:0] id_opcode_b = ifid_instr_b[6:0];
+    wire [4:0] id_rd_b     = ifid_instr_b[11:7];
+    wire [2:0] id_funct3_b = ifid_instr_b[14:12];
+    wire       id_f7b5_b   = ifid_instr_b[30];
+    wire [6:0] id_funct7_b = ifid_instr_b[31:25];
 
-    wire wt_rs1 = memwb_valid && memwb_rd_we && (memwb_rd != 5'd0) && (memwb_rd == id_rs1);
-    wire wt_rs2 = memwb_valid && memwb_rd_we && (memwb_rd != 5'd0) && (memwb_rd == id_rs2);
-    wire [31:0] id_rs1_val = wt_rs1 ? memwb_rd_data : rf_rs1;
-    wire [31:0] id_rs2_val = wt_rs2 ? memwb_rd_data : rf_rs2;
+    logic [4:0] id_rs1_b, id_rs2_b;
+    always_comb begin
+        id_rs1_b = ifid_instr_b[19:15];
+        id_rs2_b = ifid_instr_b[24:20];
+        case (id_opcode_b)
+            OP_LUI, OP_AUIPC, OP_JAL: begin id_rs1_b = 5'd0; id_rs2_b = 5'd0; end
+            OP_JALR, OP_LOAD, OP_IMM:  id_rs2_b = 5'd0;
+            default: ;
+        endcase
+    end
 
+    wire [31:0] imm_i_b = {{20{ifid_instr_b[31]}}, ifid_instr_b[31:20]};
+    wire [31:0] imm_s_b = {{20{ifid_instr_b[31]}}, ifid_instr_b[31:25], ifid_instr_b[11:7]};
+    wire [31:0] imm_b_b = {{19{ifid_instr_b[31]}}, ifid_instr_b[31], ifid_instr_b[7],
+                            ifid_instr_b[30:25], ifid_instr_b[11:8], 1'b0};
+    wire [31:0] imm_u_b = {ifid_instr_b[31:12], 12'b0};
+    wire [31:0] imm_j_b = {{11{ifid_instr_b[31]}}, ifid_instr_b[31], ifid_instr_b[19:12],
+                            ifid_instr_b[20], ifid_instr_b[30:21], 1'b0};
+
+    logic [31:0] id_imm_b;
+    always_comb begin
+        case (id_opcode_b)
+            OP_LUI, OP_AUIPC:         id_imm_b = imm_u_b;
+            OP_JAL:                    id_imm_b = imm_j_b;
+            OP_BRANCH:                 id_imm_b = imm_b_b;
+            OP_STORE:                  id_imm_b = imm_s_b;
+            OP_AMO:                    id_imm_b = 32'b0;
+            default:                   id_imm_b = imm_i_b;
+        endcase
+    end
+
+    logic [3:0]  id_alu_op_b;
+    logic        id_alu_src_imm_b, id_alu_src_pc_b;
+    logic        id_mem_read_b, id_mem_write_b, id_rd_we_b;
+    logic        id_is_branch_b, id_is_jal_b, id_is_jalr_b;
+    logic        id_is_muldiv_b, id_is_halt_b, id_is_trap_b;
+    logic        id_is_amo_b, id_is_lr_b, id_is_sc_b;
+    logic [1:0]  id_wb_sel_b;
+
+    always_comb begin
+        id_alu_op_b      = 4'b0000;
+        id_alu_src_imm_b = 1'b0;
+        id_alu_src_pc_b  = 1'b0;
+        id_mem_read_b    = 1'b0;
+        id_mem_write_b   = 1'b0;
+        id_rd_we_b       = 1'b0;
+        id_is_branch_b   = 1'b0;
+        id_is_jal_b      = 1'b0;
+        id_is_jalr_b     = 1'b0;
+        id_is_muldiv_b   = 1'b0;
+        id_is_halt_b     = 1'b0;
+        id_is_trap_b     = 1'b0;
+        id_is_amo_b      = 1'b0;
+        id_is_lr_b       = 1'b0;
+        id_is_sc_b       = 1'b0;
+        id_wb_sel_b      = WB_EX;
+
+        case (id_opcode_b)
+            OP_LUI:    begin id_alu_src_imm_b = 1'b1; id_rd_we_b = 1'b1; end
+            OP_AUIPC:  begin id_alu_src_imm_b = 1'b1; id_alu_src_pc_b = 1'b1; id_rd_we_b = 1'b1; end
+            OP_JAL:    begin id_is_jal_b = 1'b1; id_rd_we_b = 1'b1; id_wb_sel_b = WB_PC4; end
+            OP_JALR:   begin id_alu_src_imm_b = 1'b1; id_is_jalr_b = 1'b1; id_rd_we_b = 1'b1; id_wb_sel_b = WB_PC4; end
+            OP_BRANCH: begin id_alu_op_b = 4'b1000; id_is_branch_b = 1'b1; end
+            OP_LOAD:   begin id_alu_src_imm_b = 1'b1; id_mem_read_b = 1'b1; id_rd_we_b = 1'b1; id_wb_sel_b = WB_MEM; end
+            OP_STORE:  begin id_alu_src_imm_b = 1'b1; id_mem_write_b = 1'b1; end
+            OP_IMM: begin
+                id_alu_op_b = (id_funct3_b == 3'b101) ? {id_f7b5_b, id_funct3_b} : {1'b0, id_funct3_b};
+                id_alu_src_imm_b = 1'b1; id_rd_we_b = 1'b1;
+            end
+            OP_REG: begin
+                if (id_funct7_b == 7'b0000001) begin
+                    id_is_muldiv_b = 1'b1; id_rd_we_b = 1'b1;
+                end else begin
+                    id_alu_op_b = {id_f7b5_b, id_funct3_b}; id_rd_we_b = 1'b1;
+                end
+            end
+            OP_AMO: begin
+                id_rd_we_b = 1'b1; id_mem_read_b = 1'b1; id_alu_src_imm_b = 1'b1; id_wb_sel_b = WB_MEM;
+                if (ifid_instr_b[31:27] == 5'b00010) id_is_lr_b = 1'b1;
+                else if (ifid_instr_b[31:27] == 5'b00011) begin
+                    id_is_sc_b = 1'b1; id_mem_write_b = 1'b1; id_wb_sel_b = WB_EX;
+                end else begin
+                    id_is_amo_b = 1'b1; id_mem_write_b = 1'b1;
+                end
+            end
+            OP_FENCE: ;
+            OP_SYSTEM: begin
+                if (ifid_instr_b == 32'h00100073) id_is_halt_b = 1'b1;
+                else id_is_trap_b = 1'b1;
+            end
+            default: id_is_trap_b = 1'b1;
+        endcase
+    end
+
+    // ================================================================
+    // Dual-issue feasibility
+    // ================================================================
+    wire b_structural = id_mem_read_b || id_mem_write_b || id_is_amo_b || id_is_lr_b || id_is_sc_b ||
+                        id_is_muldiv_b || id_is_halt_b || id_is_trap_b;
+    wire b_raw = id_rd_we_a && (id_rd_a != 5'd0) &&
+                 ((id_rs1_b == id_rd_a) || (id_rs2_b == id_rd_a));
+    wire b_waw = id_rd_we_a && id_rd_we_b && (id_rd_a != 5'd0) && (id_rd_a == id_rd_b);
+    wire a_is_redirect = id_is_jal_a || id_is_jalr_a || id_is_branch_a;
+
+    wire can_dual_issue = ifid_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
+                          !id_is_halt_a && !id_is_trap_a;
+
+    // ================================================================
+    // Register file read with WB write-through (4 read ports)
+    // B writes after A (B more recent), so check B first
+    // ================================================================
+    wire [31:0] rf_rs1_a = (id_rs1_a == 5'd0) ? 32'b0 : regs[id_rs1_a];
+    wire [31:0] rf_rs2_a = (id_rs2_a == 5'd0) ? 32'b0 : regs[id_rs2_a];
+    wire [31:0] rf_rs1_b = (id_rs1_b == 5'd0) ? 32'b0 : regs[id_rs1_b];
+    wire [31:0] rf_rs2_b = (id_rs2_b == 5'd0) ? 32'b0 : regs[id_rs2_b];
+
+    wire wt_b_rs1_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs1_a);
+    wire wt_a_rs1_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs1_a) && !wt_b_rs1_a;
+    wire wt_b_rs2_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs2_a);
+    wire wt_a_rs2_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs2_a) && !wt_b_rs2_a;
+
+    wire wt_b_rs1_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs1_b);
+    wire wt_a_rs1_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs1_b) && !wt_b_rs1_b;
+    wire wt_b_rs2_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs2_b);
+    wire wt_a_rs2_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs2_b) && !wt_b_rs2_b;
+
+    wire [31:0] id_rs1_val_a = wt_b_rs1_a ? memwb_rd_data_b : (wt_a_rs1_a ? memwb_rd_data_a : rf_rs1_a);
+    wire [31:0] id_rs2_val_a = wt_b_rs2_a ? memwb_rd_data_b : (wt_a_rs2_a ? memwb_rd_data_a : rf_rs2_a);
+    wire [31:0] id_rs1_val_b = wt_b_rs1_b ? memwb_rd_data_b : (wt_a_rs1_b ? memwb_rd_data_a : rf_rs1_b);
+    wire [31:0] id_rs2_val_b = wt_b_rs2_b ? memwb_rd_data_b : (wt_a_rs2_b ? memwb_rd_data_a : rf_rs2_b);
+
+    // ================================================================
     // Hazard detection (load-use)
-    wire id_uses_rs1 = (id_opcode == OP_REG || id_opcode == OP_IMM || id_opcode == OP_LOAD ||
-                        id_opcode == OP_STORE || id_opcode == OP_BRANCH || id_opcode == OP_JALR ||
-                        id_opcode == OP_AMO);
-    wire id_uses_rs2 = (id_opcode == OP_REG || id_opcode == OP_STORE || id_opcode == OP_BRANCH ||
-                        id_opcode == OP_AMO);
+    // ================================================================
+    wire id_uses_rs1_a = (id_opcode_a == OP_REG || id_opcode_a == OP_IMM || id_opcode_a == OP_LOAD ||
+                          id_opcode_a == OP_STORE || id_opcode_a == OP_BRANCH || id_opcode_a == OP_JALR ||
+                          id_opcode_a == OP_AMO);
+    wire id_uses_rs2_a = (id_opcode_a == OP_REG || id_opcode_a == OP_STORE || id_opcode_a == OP_BRANCH ||
+                          id_opcode_a == OP_AMO);
+    wire id_uses_rs1_b_w = (id_opcode_b == OP_REG || id_opcode_b == OP_IMM || id_opcode_b == OP_LOAD ||
+                            id_opcode_b == OP_STORE || id_opcode_b == OP_BRANCH || id_opcode_b == OP_JALR ||
+                            id_opcode_b == OP_AMO);
+    wire id_uses_rs2_b_w = (id_opcode_b == OP_REG || id_opcode_b == OP_STORE || id_opcode_b == OP_BRANCH ||
+                            id_opcode_b == OP_AMO);
 
-    wire load_use = idex_valid && idex_mem_read && (idex_rd != 5'd0) && ifid_valid &&
-                    ((id_uses_rs1 && idex_rd == id_rs1) ||
-                     (id_uses_rs2 && idex_rd == id_rs2));
+    wire load_use_a = idex_valid_a && idex_mem_read_a && (idex_rd_a != 5'd0) && ifid_valid_a &&
+                      ((id_uses_rs1_a && idex_rd_a == id_rs1_a) ||
+                       (id_uses_rs2_a && idex_rd_a == id_rs2_a));
+
+    wire load_use_b_from_exa = idex_valid_a && idex_mem_read_a && (idex_rd_a != 5'd0) && ifid_valid_b && can_dual_issue &&
+                               ((id_uses_rs1_b_w && idex_rd_a == id_rs1_b) ||
+                                (id_uses_rs2_b_w && idex_rd_a == id_rs2_b));
+
+    wire load_use = load_use_a || load_use_b_from_exa;
 
     // ================================================================
-    // Forwarding
+    // Forwarding (4 sources: exmem_b > exmem_a > memwb_b > memwb_a)
     // ================================================================
-    wire [31:0] exmem_fwd = (exmem_wb_sel == WB_PC4) ? exmem_pc4 : exmem_result;
+    wire [31:0] exmem_fwd_a = (exmem_wb_sel_a == WB_PC4) ? exmem_pc4_a : exmem_result_a;
+    wire [31:0] exmem_fwd_b = (exmem_wb_sel_b == WB_PC4) ? exmem_pc4_b : exmem_result_b;
 
-    wire fwd_em_rs1 = exmem_valid && exmem_rd_we && (exmem_rd != 5'd0) && (exmem_rd == idex_rs1);
-    wire fwd_em_rs2 = exmem_valid && exmem_rd_we && (exmem_rd != 5'd0) && (exmem_rd == idex_rs2);
-    wire fwd_mw_rs1 = memwb_valid && memwb_rd_we && (memwb_rd != 5'd0) && (memwb_rd == idex_rs1) && !fwd_em_rs1;
-    wire fwd_mw_rs2 = memwb_valid && memwb_rd_we && (memwb_rd != 5'd0) && (memwb_rd == idex_rs2) && !fwd_em_rs2;
+    // EX slot A rs1
+    wire fwd_emb_rs1_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_a);
+    wire fwd_ema_rs1_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_a) && !fwd_emb_rs1_a;
+    wire fwd_mwb_rs1_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs1_a) && !fwd_emb_rs1_a && !fwd_ema_rs1_a;
+    wire fwd_mwa_rs1_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs1_a) && !fwd_emb_rs1_a && !fwd_ema_rs1_a && !fwd_mwb_rs1_a;
 
-    wire [31:0] fwd_rs1 = fwd_em_rs1 ? exmem_fwd : (fwd_mw_rs1 ? memwb_rd_data : idex_rs1_val);
-    wire [31:0] fwd_rs2 = fwd_em_rs2 ? exmem_fwd : (fwd_mw_rs2 ? memwb_rd_data : idex_rs2_val);
+    wire [31:0] fwd_rs1_a = fwd_emb_rs1_a ? exmem_fwd_b :
+                             fwd_ema_rs1_a ? exmem_fwd_a :
+                             fwd_mwb_rs1_a ? memwb_rd_data_b :
+                             fwd_mwa_rs1_a ? memwb_rd_data_a : idex_rs1_val_a;
+
+    // EX slot A rs2
+    wire fwd_emb_rs2_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_a);
+    wire fwd_ema_rs2_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_a) && !fwd_emb_rs2_a;
+    wire fwd_mwb_rs2_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs2_a) && !fwd_emb_rs2_a && !fwd_ema_rs2_a;
+    wire fwd_mwa_rs2_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs2_a) && !fwd_emb_rs2_a && !fwd_ema_rs2_a && !fwd_mwb_rs2_a;
+
+    wire [31:0] fwd_rs2_a = fwd_emb_rs2_a ? exmem_fwd_b :
+                             fwd_ema_rs2_a ? exmem_fwd_a :
+                             fwd_mwb_rs2_a ? memwb_rd_data_b :
+                             fwd_mwa_rs2_a ? memwb_rd_data_a : idex_rs2_val_a;
+
+    // EX slot B rs1
+    wire fwd_emb_rs1_b = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_b);
+    wire fwd_ema_rs1_b = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_b) && !fwd_emb_rs1_b;
+    wire fwd_mwb_rs1_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs1_b) && !fwd_emb_rs1_b && !fwd_ema_rs1_b;
+    wire fwd_mwa_rs1_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs1_b) && !fwd_emb_rs1_b && !fwd_ema_rs1_b && !fwd_mwb_rs1_b;
+
+    wire [31:0] fwd_rs1_b = fwd_emb_rs1_b ? exmem_fwd_b :
+                             fwd_ema_rs1_b ? exmem_fwd_a :
+                             fwd_mwb_rs1_b ? memwb_rd_data_b :
+                             fwd_mwa_rs1_b ? memwb_rd_data_a : idex_rs1_val_b;
+
+    // EX slot B rs2
+    wire fwd_emb_rs2_b = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_b);
+    wire fwd_ema_rs2_b = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_b) && !fwd_emb_rs2_b;
+    wire fwd_mwb_rs2_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs2_b) && !fwd_emb_rs2_b && !fwd_ema_rs2_b;
+    wire fwd_mwa_rs2_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs2_b) && !fwd_emb_rs2_b && !fwd_ema_rs2_b && !fwd_mwb_rs2_b;
+
+    wire [31:0] fwd_rs2_b = fwd_emb_rs2_b ? exmem_fwd_b :
+                             fwd_ema_rs2_b ? exmem_fwd_a :
+                             fwd_mwb_rs2_b ? memwb_rd_data_b :
+                             fwd_mwa_rs2_b ? memwb_rd_data_a : idex_rs2_val_b;
 
     // ================================================================
-    // EX stage — ALU
+    // EX stage -- ALU A (full: ALU + branch + mul/div)
     // ================================================================
-    wire [31:0] alu_a = idex_alu_src_pc ? idex_pc : fwd_rs1;
-    wire [31:0] alu_b = idex_alu_src_imm ? idex_imm : fwd_rs2;
+    wire [31:0] alu_a_a = idex_alu_src_pc_a ? idex_pc_a : fwd_rs1_a;
+    wire [31:0] alu_b_a = idex_alu_src_imm_a ? idex_imm_a : fwd_rs2_a;
 
-    wire        alu_do_sub = (idex_alu_op == 4'b1000) || (idex_alu_op == 4'b0010) || (idex_alu_op == 4'b0011);
-    wire [32:0] alu_ext = {1'b0, alu_a} + {1'b0, alu_do_sub ? ~alu_b : alu_b} + {32'b0, alu_do_sub};
-    wire [31:0] alu_sum   = alu_ext[31:0];
-    wire        alu_carry = alu_ext[32];
-    wire        alu_lt    = (alu_a[31] != alu_b[31]) ? alu_a[31] : alu_sum[31];
-    wire        alu_ltu   = !alu_carry;
+    wire        alu_do_sub_a = (idex_alu_op_a == 4'b1000) || (idex_alu_op_a == 4'b0010) || (idex_alu_op_a == 4'b0011);
+    wire [32:0] alu_ext_a = {1'b0, alu_a_a} + {1'b0, alu_do_sub_a ? ~alu_b_a : alu_b_a} + {32'b0, alu_do_sub_a};
+    wire [31:0] alu_sum_a   = alu_ext_a[31:0];
+    wire        alu_carry_a = alu_ext_a[32];
+    wire        alu_lt_a    = (alu_a_a[31] != alu_b_a[31]) ? alu_a_a[31] : alu_sum_a[31];
+    wire        alu_ltu_a   = !alu_carry_a;
 
-    logic [31:0] alu_result;
+    logic [31:0] alu_result_a;
     always_comb begin
-        case (idex_alu_op)
-            4'b0000, 4'b1000: alu_result = alu_sum;
-            4'b0001:          alu_result = alu_a << alu_b[4:0];
-            4'b0010:          alu_result = {31'b0, alu_lt};
-            4'b0011:          alu_result = {31'b0, alu_ltu};
-            4'b0100:          alu_result = alu_a ^ alu_b;
-            4'b0101:          alu_result = alu_a >> alu_b[4:0];
-            4'b1101:          alu_result = $signed(alu_a) >>> alu_b[4:0];
-            4'b0110:          alu_result = alu_a | alu_b;
-            4'b0111:          alu_result = alu_a & alu_b;
-            default:          alu_result = alu_sum;
+        case (idex_alu_op_a)
+            4'b0000, 4'b1000: alu_result_a = alu_sum_a;
+            4'b0001:          alu_result_a = alu_a_a << alu_b_a[4:0];
+            4'b0010:          alu_result_a = {31'b0, alu_lt_a};
+            4'b0011:          alu_result_a = {31'b0, alu_ltu_a};
+            4'b0100:          alu_result_a = alu_a_a ^ alu_b_a;
+            4'b0101:          alu_result_a = alu_a_a >> alu_b_a[4:0];
+            4'b1101:          alu_result_a = $signed(alu_a_a) >>> alu_b_a[4:0];
+            4'b0110:          alu_result_a = alu_a_a | alu_b_a;
+            4'b0111:          alu_result_a = alu_a_a & alu_b_a;
+            default:          alu_result_a = alu_sum_a;
         endcase
     end
 
-    // Branch
-    logic branch_taken;
+    logic branch_taken_a;
     always_comb begin
-        branch_taken = 1'b0;
-        if (idex_is_branch) begin
-            case (idex_funct3)
-                3'b000:  branch_taken = (alu_sum == 32'b0);
-                3'b001:  branch_taken = (alu_sum != 32'b0);
-                3'b100:  branch_taken = alu_lt;
-                3'b101:  branch_taken = !alu_lt;
-                3'b110:  branch_taken = alu_ltu;
-                3'b111:  branch_taken = !alu_ltu;
+        branch_taken_a = 1'b0;
+        if (idex_is_branch_a) begin
+            case (idex_funct3_a)
+                3'b000:  branch_taken_a = (alu_sum_a == 32'b0);
+                3'b001:  branch_taken_a = (alu_sum_a != 32'b0);
+                3'b100:  branch_taken_a = alu_lt_a;
+                3'b101:  branch_taken_a = !alu_lt_a;
+                3'b110:  branch_taken_a = alu_ltu_a;
+                3'b111:  branch_taken_a = !alu_ltu_a;
                 default: ;
             endcase
         end
     end
 
-    wire [31:0] branch_target = idex_pc + idex_imm;
-    wire [31:0] ex_pc4 = idex_pc + (idex_compressed ? 32'd2 : 32'd4);
+    wire [31:0] branch_target_a = idex_pc_a + idex_imm_a;
+    wire [31:0] ex_pc4_a = idex_pc_a + (idex_compressed_a ? 32'd2 : 32'd4);
 
-    wire redirect = idex_valid && !idex_is_trap && !idex_is_halt &&
-                    (idex_is_jal || idex_is_jalr || branch_taken);
-    wire [31:0] redirect_target = idex_is_jalr ? {alu_result[31:1], 1'b0} : branch_target;
+    wire redirect_a = idex_valid_a && !idex_is_trap_a && !idex_is_halt_a &&
+                      (idex_is_jal_a || idex_is_jalr_a || branch_taken_a);
+    wire [31:0] redirect_target_a = idex_is_jalr_a ? {alu_result_a[31:1], 1'b0} : branch_target_a;
 
-    // M extension — multiply (combinational, single cycle)
-    wire        mul_a_signed = (idex_funct3 == 3'b001 || idex_funct3 == 3'b010);
-    wire        mul_b_signed = (idex_funct3 == 3'b001);
-    wire signed [32:0] mul_op_a = {mul_a_signed ? fwd_rs1[31] : 1'b0, fwd_rs1};
-    wire signed [32:0] mul_op_b = {mul_b_signed ? fwd_rs2[31] : 1'b0, fwd_rs2};
+    // M extension -- multiply (slot A only)
+    wire        mul_a_signed = (idex_funct3_a == 3'b001 || idex_funct3_a == 3'b010);
+    wire        mul_b_signed = (idex_funct3_a == 3'b001);
+    wire signed [32:0] mul_op_a = {mul_a_signed ? fwd_rs1_a[31] : 1'b0, fwd_rs1_a};
+    wire signed [32:0] mul_op_b = {mul_b_signed ? fwd_rs2_a[31] : 1'b0, fwd_rs2_a};
     wire signed [65:0] mul_prod = mul_op_a * mul_op_b;
-    wire [31:0] mul_result = (idex_funct3[1:0] == 2'b00) ? mul_prod[31:0] : mul_prod[63:32];
+    wire [31:0] mul_result = (idex_funct3_a[1:0] == 2'b00) ? mul_prod[31:0] : mul_prod[63:32];
 
-    // M extension — divide
-    wire idex_is_mul = idex_is_muldiv && !idex_funct3[2];
-    wire idex_is_div = idex_is_muldiv && idex_funct3[2];
-    wire start_div   = idex_valid && idex_is_div && !div_active;
+    wire idex_is_mul_a = idex_is_muldiv_a && !idex_funct3_a[2];
+    wire idex_is_div_a = idex_is_muldiv_a && idex_funct3_a[2];
+    wire start_div     = idex_valid_a && idex_is_div_a && !div_active;
 
-    wire        div_signed = !idex_funct3[0];
-    wire [31:0] div_abs_a  = (div_signed && fwd_rs1[31]) ? (~fwd_rs1 + 32'd1) : fwd_rs1;
-    wire [31:0] div_abs_b  = (div_signed && fwd_rs2[31]) ? (~fwd_rs2 + 32'd1) : fwd_rs2;
+    wire        div_signed = !idex_funct3_a[0];
+    wire [31:0] div_abs_a  = (div_signed && fwd_rs1_a[31]) ? (~fwd_rs1_a + 32'd1) : fwd_rs1_a;
+    wire [31:0] div_abs_b  = (div_signed && fwd_rs2_a[31]) ? (~fwd_rs2_a + 32'd1) : fwd_rs2_a;
 
     wire [31:0] div_q_final = div_bz ? 32'hFFFFFFFF : (div_nq ? (~div_quot + 32'd1) : div_quot);
     wire [31:0] div_r_final = div_bz ? div_raw_dividend : (div_nr ? (~div_rem + 32'd1) : div_rem);
-    wire [31:0] div_result  = idex_funct3[1] ? div_r_final : div_q_final;
+    wire [31:0] div_result  = idex_funct3_a[1] ? div_r_final : div_q_final;
 
-    // EX result mux
-    wire [31:0] ex_result = idex_is_mul ? mul_result :
-                            (idex_is_div && div_ready) ? div_result : alu_result;
+    wire [31:0] ex_result_a = idex_is_mul_a ? mul_result :
+                              (idex_is_div_a && div_ready) ? div_result : alu_result_a;
+
+    // ================================================================
+    // EX stage -- ALU B (ALU + branch, no mul/div/mem)
+    // ================================================================
+    wire [31:0] alu_a_b = idex_alu_src_pc_b ? idex_pc_b : fwd_rs1_b;
+    wire [31:0] alu_b_b = idex_alu_src_imm_b ? idex_imm_b : fwd_rs2_b;
+
+    wire        alu_do_sub_b = (idex_alu_op_b == 4'b1000) || (idex_alu_op_b == 4'b0010) || (idex_alu_op_b == 4'b0011);
+    wire [32:0] alu_ext_b = {1'b0, alu_a_b} + {1'b0, alu_do_sub_b ? ~alu_b_b : alu_b_b} + {32'b0, alu_do_sub_b};
+    wire [31:0] alu_sum_b   = alu_ext_b[31:0];
+    wire        alu_carry_b = alu_ext_b[32];
+    wire        alu_lt_b    = (alu_a_b[31] != alu_b_b[31]) ? alu_a_b[31] : alu_sum_b[31];
+    wire        alu_ltu_b   = !alu_carry_b;
+
+    logic [31:0] alu_result_b;
+    always_comb begin
+        case (idex_alu_op_b)
+            4'b0000, 4'b1000: alu_result_b = alu_sum_b;
+            4'b0001:          alu_result_b = alu_a_b << alu_b_b[4:0];
+            4'b0010:          alu_result_b = {31'b0, alu_lt_b};
+            4'b0011:          alu_result_b = {31'b0, alu_ltu_b};
+            4'b0100:          alu_result_b = alu_a_b ^ alu_b_b;
+            4'b0101:          alu_result_b = alu_a_b >> alu_b_b[4:0];
+            4'b1101:          alu_result_b = $signed(alu_a_b) >>> alu_b_b[4:0];
+            4'b0110:          alu_result_b = alu_a_b | alu_b_b;
+            4'b0111:          alu_result_b = alu_a_b & alu_b_b;
+            default:          alu_result_b = alu_sum_b;
+        endcase
+    end
+
+    logic branch_taken_b;
+    always_comb begin
+        branch_taken_b = 1'b0;
+        if (idex_is_branch_b) begin
+            case (idex_funct3_b)
+                3'b000:  branch_taken_b = (alu_sum_b == 32'b0);
+                3'b001:  branch_taken_b = (alu_sum_b != 32'b0);
+                3'b100:  branch_taken_b = alu_lt_b;
+                3'b101:  branch_taken_b = !alu_lt_b;
+                3'b110:  branch_taken_b = alu_ltu_b;
+                3'b111:  branch_taken_b = !alu_ltu_b;
+                default: ;
+            endcase
+        end
+    end
+
+    wire [31:0] branch_target_b = idex_pc_b + idex_imm_b;
+    wire [31:0] ex_pc4_b = idex_pc_b + (idex_compressed_b ? 32'd2 : 32'd4);
+
+    wire redirect_b = idex_valid_b && !redirect_a &&
+                      (idex_is_jal_b || idex_is_jalr_b || branch_taken_b);
+    wire [31:0] redirect_target_b = idex_is_jalr_b ? {alu_result_b[31:1], 1'b0} : branch_target_b;
+
+    wire [31:0] ex_result_b = alu_result_b;
 
     // ================================================================
     // Pipeline control
     // ================================================================
-    wire stall_div  = idex_valid && idex_is_div && !div_ready;
+    wire redirect = redirect_a || redirect_b;
+    wire [31:0] redirect_target = redirect_a ? redirect_target_a : redirect_target_b;
+
+    wire stall_div  = idex_valid_a && idex_is_div_a && !div_ready;
     wire stall_load = load_use;
-    wire stall_xword = if_stall_xword && !flush;
     wire stall_pipe = stall_div || stall_load;
-    wire flush      = redirect || (idex_valid && (idex_is_trap || idex_is_halt));
+    wire flush      = redirect || (idex_valid_a && (idex_is_trap_a || idex_is_halt_a));
 
     wire halted = halt_o || trap_o;
 
     // ================================================================
-    // MEM stage — load/store alignment
+    // MEM stage -- load/store alignment (slot A only)
     // ================================================================
-    wire [1:0] mem_off = exmem_result[1:0];
+    wire [1:0] mem_off = exmem_result_a[1:0];
+    assign dmem_addr_o = {exmem_result_a[31:2], 2'b00};
 
-    assign dmem_addr_o = {exmem_result[31:2], 2'b00};
-
-    // Load data extraction
     logic [7:0] load_byte;
     always_comb begin
         case (mem_off)
@@ -605,7 +855,7 @@ module rv32i_core #(
 
     logic [31:0] load_data;
     always_comb begin
-        case (exmem_funct3)
+        case (exmem_funct3_a)
             3'b000:  load_data = {{24{load_byte[7]}}, load_byte};
             3'b001:  load_data = {{16{load_half[15]}}, load_half};
             3'b010:  load_data = dmem_rdata_i;
@@ -615,26 +865,25 @@ module rv32i_core #(
         endcase
     end
 
-    // Store data/strobe
     logic [31:0] store_data;
     always_comb begin
         case (mem_off)
-            2'b00:   store_data = exmem_rs2_val;
-            2'b01:   store_data = {exmem_rs2_val[23:0], 8'b0};
-            2'b10:   store_data = {exmem_rs2_val[15:0], 16'b0};
-            default: store_data = {exmem_rs2_val[7:0],  24'b0};
+            2'b00:   store_data = exmem_rs2_val_a;
+            2'b01:   store_data = {exmem_rs2_val_a[23:0], 8'b0};
+            2'b10:   store_data = {exmem_rs2_val_a[15:0], 16'b0};
+            default: store_data = {exmem_rs2_val_a[7:0],  24'b0};
         endcase
     end
 
     logic [3:0] store_strobe;
     always_comb begin
         store_strobe = 4'b0000;
-        if (exmem_valid && exmem_is_amo) begin
+        if (exmem_valid_a && exmem_is_amo_a)
             store_strobe = 4'b1111;
-        end else if (exmem_valid && exmem_is_sc) begin
+        else if (exmem_valid_a && exmem_is_sc_a)
             store_strobe = sc_success ? 4'b1111 : 4'b0000;
-        end else if (exmem_valid && exmem_mem_write) begin
-            case (exmem_funct3)
+        else if (exmem_valid_a && exmem_mem_write_a) begin
+            case (exmem_funct3_a)
                 3'b000:  store_strobe = 4'b0001 << mem_off;
                 3'b001:  store_strobe = 4'b0011 << mem_off;
                 3'b010:  store_strobe = 4'b1111;
@@ -643,169 +892,233 @@ module rv32i_core #(
         end
     end
 
-    assign dmem_wdata_o = (exmem_is_amo) ? amo_result :
-                          (exmem_is_sc)  ? exmem_rs2_val : store_data;
+    assign dmem_wdata_o = exmem_is_amo_a ? amo_result :
+                          exmem_is_sc_a  ? exmem_rs2_val_a : store_data;
     assign dmem_wstrb_o = store_strobe;
 
     // ================================================================
-    // A extension — AMO compute + LR/SC logic in MEM stage
+    // A extension -- AMO + LR/SC
     // ================================================================
     logic [31:0] amo_result;
     always_comb begin
-        case (exmem_amo_funct5)
-            5'b00001: amo_result = exmem_rs2_val;                                    // AMOSWAP
-            5'b00000: amo_result = dmem_rdata_i + exmem_rs2_val;                     // AMOADD
-            5'b00100: amo_result = dmem_rdata_i ^ exmem_rs2_val;                     // AMOXOR
-            5'b01100: amo_result = dmem_rdata_i & exmem_rs2_val;                     // AMOAND
-            5'b01000: amo_result = dmem_rdata_i | exmem_rs2_val;                     // AMOOR
-            5'b10000: amo_result = ($signed(dmem_rdata_i) < $signed(exmem_rs2_val))  // AMOMIN
-                                   ? dmem_rdata_i : exmem_rs2_val;
-            5'b10100: amo_result = ($signed(dmem_rdata_i) > $signed(exmem_rs2_val))  // AMOMAX
-                                   ? dmem_rdata_i : exmem_rs2_val;
-            5'b11000: amo_result = (dmem_rdata_i < exmem_rs2_val)                    // AMOMINU
-                                   ? dmem_rdata_i : exmem_rs2_val;
-            5'b11100: amo_result = (dmem_rdata_i > exmem_rs2_val)                    // AMOMAXU
-                                   ? dmem_rdata_i : exmem_rs2_val;
-            default:  amo_result = exmem_rs2_val;
+        case (exmem_amo_funct5_a)
+            5'b00001: amo_result = exmem_rs2_val_a;
+            5'b00000: amo_result = dmem_rdata_i + exmem_rs2_val_a;
+            5'b00100: amo_result = dmem_rdata_i ^ exmem_rs2_val_a;
+            5'b01100: amo_result = dmem_rdata_i & exmem_rs2_val_a;
+            5'b01000: amo_result = dmem_rdata_i | exmem_rs2_val_a;
+            5'b10000: amo_result = ($signed(dmem_rdata_i) < $signed(exmem_rs2_val_a)) ? dmem_rdata_i : exmem_rs2_val_a;
+            5'b10100: amo_result = ($signed(dmem_rdata_i) > $signed(exmem_rs2_val_a)) ? dmem_rdata_i : exmem_rs2_val_a;
+            5'b11000: amo_result = (dmem_rdata_i < exmem_rs2_val_a) ? dmem_rdata_i : exmem_rs2_val_a;
+            5'b11100: amo_result = (dmem_rdata_i > exmem_rs2_val_a) ? dmem_rdata_i : exmem_rs2_val_a;
+            default:  amo_result = exmem_rs2_val_a;
         endcase
     end
 
-    wire sc_success = exmem_is_sc && resv_valid && (resv_addr == exmem_result);
+    wire sc_success = exmem_is_sc_a && resv_valid && (resv_addr == exmem_result_a);
 
-    // MEM result mux
-    wire [31:0] mem_rd_data = exmem_is_sc  ? {31'b0, ~sc_success} :
-                              (exmem_is_amo || exmem_is_lr) ? dmem_rdata_i :
-                              (exmem_wb_sel == WB_MEM) ? load_data :
-                              (exmem_wb_sel == WB_PC4) ? exmem_pc4 : exmem_result;
+    wire [31:0] mem_rd_data_a = exmem_is_sc_a  ? {31'b0, ~sc_success} :
+                                (exmem_is_amo_a || exmem_is_lr_a) ? dmem_rdata_i :
+                                (exmem_wb_sel_a == WB_MEM) ? load_data :
+                                (exmem_wb_sel_a == WB_PC4) ? exmem_pc4_a : exmem_result_a;
+
+    wire [31:0] mem_rd_data_b = (exmem_wb_sel_b == WB_PC4) ? exmem_pc4_b : exmem_result_b;
 
     // ================================================================
     // Sequential logic
     // ================================================================
+
+    // Signal: did we actually dual-issue this cycle (for PC advancement)?
+    // This is the decision made during the ID stage for what to send to IDEX.
+    wire did_dual_issue = !stall_pipe && !flush && ifid_valid_a && can_dual_issue;
+
+    // Signal: did we hold slot B this cycle?
+    wire do_hold_b = !stall_pipe && !flush && ifid_valid_a && ifid_valid_b && !can_dual_issue && !held_valid;
+
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            pc_q        <= RESET_PC;
-            ifid_valid  <= 1'b0;
-            idex_valid  <= 1'b0;
-            exmem_valid <= 1'b0;
-            memwb_valid <= 1'b0;
-            trap_o      <= 1'b0;
-            halt_o      <= 1'b0;
-            div_active  <= 1'b0;
-            hwbuf_valid <= 1'b0;
-            resv_valid  <= 1'b0;
+            pc_q            <= RESET_PC;
+            ifid_valid_a    <= 1'b0;
+            ifid_valid_b    <= 1'b0;
+            idex_valid_a    <= 1'b0;
+            idex_valid_b    <= 1'b0;
+            exmem_valid_a   <= 1'b0;
+            exmem_valid_b   <= 1'b0;
+            memwb_valid_a   <= 1'b0;
+            memwb_valid_b   <= 1'b0;
+            trap_o          <= 1'b0;
+            halt_o          <= 1'b0;
+            div_active      <= 1'b0;
+            resv_valid      <= 1'b0;
+            held_valid      <= 1'b0;
             for (int i = 1; i < 32; i++) regs[i] <= 32'b0;
         end else if (halted) begin
             // frozen
         end else begin
             // ---- WB: register file write ----
-            if (memwb_valid && memwb_rd_we && memwb_rd != 5'd0)
-                regs[memwb_rd] <= memwb_rd_data;
+            if (memwb_valid_a && memwb_rd_we_a && memwb_rd_a != 5'd0)
+                regs[memwb_rd_a] <= memwb_rd_data_a;
+            if (memwb_valid_b && memwb_rd_we_b && memwb_rd_b != 5'd0)
+                regs[memwb_rd_b] <= memwb_rd_data_b;
 
-            if (memwb_valid && memwb_is_trap) trap_o <= 1'b1;
-            if (memwb_valid && memwb_is_halt) halt_o <= 1'b1;
+            if (memwb_valid_a && memwb_is_trap_a) trap_o <= 1'b1;
+            if (memwb_valid_a && memwb_is_halt_a) halt_o <= 1'b1;
 
-            // ---- MEM/WB update (always) ----
-            memwb_valid   <= exmem_valid && !exmem_is_trap && !exmem_is_halt ? 1'b1 :
-                             exmem_valid;
-            memwb_rd      <= exmem_rd;
-            memwb_rd_we   <= exmem_valid ? exmem_rd_we : 1'b0;
-            memwb_rd_data <= mem_rd_data;
-            memwb_is_halt <= exmem_valid && exmem_is_halt;
-            memwb_is_trap <= exmem_valid && exmem_is_trap;
-            memwb_valid   <= exmem_valid;
+            // ---- MEM/WB ----
+            memwb_valid_a   <= exmem_valid_a;
+            memwb_rd_a      <= exmem_rd_a;
+            memwb_rd_we_a   <= exmem_valid_a ? exmem_rd_we_a : 1'b0;
+            memwb_rd_data_a <= mem_rd_data_a;
+            memwb_is_halt_a <= exmem_valid_a && exmem_is_halt_a;
+            memwb_is_trap_a <= exmem_valid_a && exmem_is_trap_a;
 
-            // ---- EX/MEM update ----
+            memwb_valid_b   <= exmem_valid_b;
+            memwb_rd_b      <= exmem_rd_b;
+            memwb_rd_we_b   <= exmem_valid_b ? exmem_rd_we_b : 1'b0;
+            memwb_rd_data_b <= mem_rd_data_b;
+
+            // ---- EX/MEM ----
             if (stall_div) begin
-                exmem_valid <= 1'b0;
+                exmem_valid_a <= 1'b0;
+                exmem_valid_b <= 1'b0;
             end else begin
-                exmem_valid     <= idex_valid;
-                exmem_result    <= ex_result;
-                exmem_rs2_val   <= fwd_rs2;
-                exmem_pc4       <= ex_pc4;
-                exmem_rd        <= idex_rd;
-                exmem_funct3    <= idex_funct3;
-                exmem_rd_we     <= idex_rd_we && !idex_is_trap && !idex_is_halt;
-                exmem_mem_read  <= idex_mem_read;
-                exmem_mem_write <= idex_mem_write && !idex_is_trap && !idex_is_halt;
-                exmem_wb_sel    <= idex_wb_sel;
-                exmem_is_halt   <= idex_is_halt;
-                exmem_is_trap   <= idex_is_trap;
-                exmem_is_amo    <= idex_is_amo;
-                exmem_is_lr     <= idex_is_lr;
-                exmem_is_sc     <= idex_is_sc;
-                exmem_amo_funct5<= idex_amo_funct5;
+                exmem_valid_a     <= idex_valid_a;
+                exmem_result_a    <= ex_result_a;
+                exmem_rs2_val_a   <= fwd_rs2_a;
+                exmem_pc4_a       <= ex_pc4_a;
+                exmem_rd_a        <= idex_rd_a;
+                exmem_funct3_a    <= idex_funct3_a;
+                exmem_rd_we_a     <= idex_rd_we_a && !idex_is_trap_a && !idex_is_halt_a;
+                exmem_mem_read_a  <= idex_mem_read_a;
+                exmem_mem_write_a <= idex_mem_write_a && !idex_is_trap_a && !idex_is_halt_a;
+                exmem_wb_sel_a    <= idex_wb_sel_a;
+                exmem_is_halt_a   <= idex_is_halt_a;
+                exmem_is_trap_a   <= idex_is_trap_a;
+                exmem_is_amo_a    <= idex_is_amo_a;
+                exmem_is_lr_a     <= idex_is_lr_a;
+                exmem_is_sc_a     <= idex_is_sc_a;
+                exmem_amo_funct5_a<= idex_amo_funct5_a;
+
+                exmem_valid_b     <= redirect_a ? 1'b0 : idex_valid_b;
+                exmem_result_b    <= ex_result_b;
+                exmem_pc4_b       <= ex_pc4_b;
+                exmem_rd_b        <= idex_rd_b;
+                exmem_rd_we_b     <= idex_rd_we_b;
+                exmem_wb_sel_b    <= idex_wb_sel_b;
             end
 
-            // ---- ID/EX update ----
+            // ---- ID/EX ----
             if (stall_div) begin
                 // hold
             end else if (flush || stall_load) begin
-                idex_valid <= 1'b0;
+                idex_valid_a <= 1'b0;
+                idex_valid_b <= 1'b0;
             end else begin
-                idex_valid      <= ifid_valid;
-                idex_pc         <= ifid_pc;
-                idex_rs1_val    <= id_rs1_val;
-                idex_rs2_val    <= id_rs2_val;
-                idex_imm        <= id_imm;
-                idex_rd         <= id_rd;
-                idex_rs1        <= id_rs1;
-                idex_rs2        <= id_rs2;
-                idex_alu_op     <= id_alu_op;
-                idex_funct3     <= id_funct3;
-                idex_alu_src_imm<= id_alu_src_imm;
-                idex_alu_src_pc <= id_alu_src_pc;
-                idex_mem_read   <= id_mem_read;
-                idex_mem_write  <= id_mem_write;
-                idex_rd_we      <= id_rd_we;
-                idex_is_branch  <= id_is_branch;
-                idex_is_jal     <= id_is_jal;
-                idex_is_jalr    <= id_is_jalr;
-                idex_is_muldiv  <= id_is_muldiv;
-                idex_wb_sel     <= id_wb_sel;
-                idex_is_halt    <= id_is_halt;
-                idex_is_trap    <= id_is_trap;
-                idex_is_amo     <= id_is_amo;
-                idex_is_lr      <= id_is_lr;
-                idex_is_sc      <= id_is_sc;
-                idex_amo_funct5 <= id_amo_funct5;
-                idex_compressed <= ifid_compressed;
+                idex_valid_a      <= ifid_valid_a;
+                idex_pc_a         <= ifid_pc_a;
+                idex_rs1_val_a    <= id_rs1_val_a;
+                idex_rs2_val_a    <= id_rs2_val_a;
+                idex_imm_a        <= id_imm_a;
+                idex_rd_a         <= id_rd_a;
+                idex_rs1_a        <= id_rs1_a;
+                idex_rs2_a        <= id_rs2_a;
+                idex_alu_op_a     <= id_alu_op_a;
+                idex_funct3_a     <= id_funct3_a;
+                idex_alu_src_imm_a<= id_alu_src_imm_a;
+                idex_alu_src_pc_a <= id_alu_src_pc_a;
+                idex_mem_read_a   <= id_mem_read_a;
+                idex_mem_write_a  <= id_mem_write_a;
+                idex_rd_we_a      <= id_rd_we_a;
+                idex_is_branch_a  <= id_is_branch_a;
+                idex_is_jal_a     <= id_is_jal_a;
+                idex_is_jalr_a    <= id_is_jalr_a;
+                idex_is_muldiv_a  <= id_is_muldiv_a;
+                idex_wb_sel_a     <= id_wb_sel_a;
+                idex_is_halt_a    <= id_is_halt_a;
+                idex_is_trap_a    <= id_is_trap_a;
+                idex_is_amo_a     <= id_is_amo_a;
+                idex_is_lr_a      <= id_is_lr_a;
+                idex_is_sc_a      <= id_is_sc_a;
+                idex_amo_funct5_a <= id_amo_funct5_a;
+                idex_compressed_a <= ifid_compressed_a;
+
+                idex_valid_b      <= ifid_valid_a && can_dual_issue;
+                idex_pc_b         <= ifid_pc_b;
+                idex_rs1_val_b    <= id_rs1_val_b;
+                idex_rs2_val_b    <= id_rs2_val_b;
+                idex_imm_b        <= id_imm_b;
+                idex_rd_b         <= id_rd_b;
+                idex_rs1_b        <= id_rs1_b;
+                idex_rs2_b        <= id_rs2_b;
+                idex_alu_op_b     <= id_alu_op_b;
+                idex_funct3_b     <= id_funct3_b;
+                idex_alu_src_imm_b<= id_alu_src_imm_b;
+                idex_alu_src_pc_b <= id_alu_src_pc_b;
+                idex_rd_we_b      <= id_rd_we_b;
+                idex_is_branch_b  <= id_is_branch_b;
+                idex_is_jal_b     <= id_is_jal_b;
+                idex_is_jalr_b    <= id_is_jalr_b;
+                idex_wb_sel_b     <= id_wb_sel_b;
+                idex_compressed_b <= ifid_compressed_b;
             end
 
-            // ---- IF/ID update ----
+            // ---- IF/ID ----
             if (stall_pipe) begin
-                // hold
+                // hold IF/ID and held state
             end else if (flush) begin
-                ifid_valid <= 1'b0;
-                hwbuf_valid <= 1'b0;
-            end else if (stall_xword) begin
-                // Cross-word-boundary: buffer upper 16 bits, emit bubble
-                hwbuf       <= imem_rdata_i[31:16];
-                hwbuf_valid <= 1'b1;
-                ifid_valid  <= 1'b0;
+                ifid_valid_a <= 1'b0;
+                ifid_valid_b <= 1'b0;
+                held_valid   <= 1'b0;
+            end else if (do_hold_b) begin
+                // IFID_A is being consumed by IDEX this cycle (above).
+                // IFID_B can't dual-issue -- hold it for next cycle.
+                // Insert bubble into IFID so next cycle the held replay takes effect.
+                ifid_valid_a      <= 1'b0;
+                ifid_valid_b      <= 1'b0;
+                held_valid        <= 1'b1;
+                held_pc           <= ifid_pc_b;
+                held_instr        <= ifid_instr_b;
+                held_compressed   <= ifid_compressed_b;
+            end else if (held_valid) begin
+                // Replay held instruction as slot A, fetch from memory as slot B
+                ifid_valid_a      <= 1'b1;
+                ifid_pc_a         <= held_pc;
+                ifid_instr_a      <= held_instr;
+                ifid_compressed_a <= held_compressed;
+                ifid_valid_b      <= if_valid_a;
+                ifid_pc_b         <= pc_q;
+                ifid_instr_b      <= if_instr_a;
+                ifid_compressed_b <= if_compressed_a;
+                held_valid        <= 1'b0;
             end else begin
-                ifid_valid      <= 1'b1;
-                ifid_pc         <= hwbuf_valid ? (pc_q - 32'd2) : pc_q;
-                ifid_instr      <= if_instr;
-                ifid_compressed <= if_is_compressed;
-                if (hwbuf_valid)
-                    hwbuf_valid <= 1'b0;
+                // Normal fetch: load both slots from memory
+                ifid_valid_a      <= if_valid_a;
+                ifid_pc_a         <= pc_q;
+                ifid_instr_a      <= if_instr_a;
+                ifid_compressed_a <= if_compressed_a;
+                ifid_valid_b      <= if_valid_b;
+                ifid_pc_b         <= if_next_pc;
+                ifid_instr_b      <= if_instr_b;
+                ifid_compressed_b <= if_compressed_b;
             end
 
             // ---- PC update ----
             if (redirect) begin
                 pc_q <= redirect_target;
-                hwbuf_valid <= 1'b0;
+                held_valid <= 1'b0;
             end else if (!stall_pipe) begin
-                if (stall_xword) begin
-                    // Move PC to next word (the word containing upper half)
-                    pc_q <= {pc_q[31:2] + 30'd1, 2'b00};
-                end else if (hwbuf_valid) begin
-                    // Cross-boundary instr started at prev_word+2, length 4.
-                    // During stall we advanced PC to next word. Now advance +2
-                    // to land at prev_word + 2 + 4 = next_word + 2.
-                    pc_q <= pc_q + 32'd2;
+                if (do_hold_b) begin
+                    // Holding IFID_B. Next cycle we replay held + fetch.
+                    // PC should point to the instruction AFTER the held one.
+                    pc_q <= ifid_pc_b + (ifid_compressed_b ? 32'd2 : 32'd4);
+                end else if (held_valid) begin
+                    // Replaying held as IFID_A, fetching if_instr_a as IFID_B.
+                    // Advance PC past the newly fetched instruction.
+                    pc_q <= if_next_pc;
+                end else if (if_valid_b) begin
+                    pc_q <= if_pc_after_b;
                 end else begin
-                    pc_q <= pc_q + (if_is_compressed ? 32'd2 : 32'd4);
+                    pc_q <= if_next_pc;
                 end
             end
 
@@ -816,10 +1129,10 @@ module rv32i_core #(
                 div_quot         <= div_abs_a;
                 div_rem          <= 32'b0;
                 div_dvsr         <= div_abs_b;
-                div_nq           <= div_signed && (fwd_rs1[31] ^ fwd_rs2[31]) && (fwd_rs2 != 32'b0);
-                div_nr           <= div_signed && fwd_rs1[31];
-                div_bz           <= (fwd_rs2 == 32'b0);
-                div_raw_dividend <= fwd_rs1;
+                div_nq           <= div_signed && (fwd_rs1_a[31] ^ fwd_rs2_a[31]) && (fwd_rs2_a != 32'b0);
+                div_nr           <= div_signed && fwd_rs1_a[31];
+                div_bz           <= (fwd_rs2_a == 32'b0);
+                div_raw_dividend <= fwd_rs1_a;
             end else if (div_active && div_cnt != 6'd0) begin
                 if (!div_trial[32]) begin
                     div_rem  <= div_trial[31:0];
@@ -833,14 +1146,14 @@ module rv32i_core #(
                 div_active <= 1'b0;
             end
 
-            // ---- LR/SC reservation tracking ----
-            if (exmem_valid && exmem_is_lr) begin
-                resv_addr  <= exmem_result;
+            // ---- LR/SC ----
+            if (exmem_valid_a && exmem_is_lr_a) begin
+                resv_addr  <= exmem_result_a;
                 resv_valid <= 1'b1;
-            end else if (exmem_valid && exmem_is_sc) begin
+            end else if (exmem_valid_a && exmem_is_sc_a) begin
                 resv_valid <= 1'b0;
-            end else if (exmem_valid && exmem_mem_write && resv_valid &&
-                         exmem_result == resv_addr) begin
+            end else if (exmem_valid_a && exmem_mem_write_a && resv_valid &&
+                         exmem_result_a == resv_addr) begin
                 resv_valid <= 1'b0;
             end
         end
