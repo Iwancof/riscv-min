@@ -40,7 +40,7 @@ module rv32i_core #(
     logic        ifid_valid_b, ifid_compressed_b;
 
     // --- ID/EX ---
-    logic [31:0] idex_pc_a, idex_rs1_val_a, idex_rs2_val_a, idex_imm_a;
+    logic [31:0] idex_pc_a, idex_imm_a;
     logic [4:0]  idex_rd_a, idex_rs1_a, idex_rs2_a;
     logic [3:0]  idex_alu_op_a;
     logic [2:0]  idex_funct3_a;
@@ -53,7 +53,7 @@ module rv32i_core #(
     logic [1:0]  idex_wb_sel_a;
     logic        idex_valid_a, idex_compressed_a;
 
-    logic [31:0] idex_pc_b, idex_rs1_val_b, idex_rs2_val_b, idex_imm_b;
+    logic [31:0] idex_pc_b, idex_imm_b;
     logic [4:0]  idex_rd_b, idex_rs1_b, idex_rs2_b;
     logic [3:0]  idex_alu_op_b;
     logic [2:0]  idex_funct3_b;
@@ -601,32 +601,31 @@ module rv32i_core #(
 
     wire a_is_shift = (id_opcode_a == OP_IMM || id_opcode_a == OP_REG) &&
                       (id_funct3_a == 3'b001 || id_funct3_a == 3'b101);
+
+    // Bypass-readiness check for slot B: reject if any in-flight writer
+    // overlaps with B's source registers (IDEX_A, IDEX_B, EXMEM_A, EXMEM_B).
+    // MEMWB writes complete before EX-stage RF read, so no check needed.
+    wire b_dep_idex_a  = idex_valid_a && idex_rd_we_a && (idex_rd_a != 5'd0) &&
+                         ((id_rs1_b == idex_rd_a) || (id_rs2_b == idex_rd_a));
+    wire b_dep_idex_b  = idex_valid_b && idex_rd_we_b && (idex_rd_b != 5'd0) &&
+                         ((id_rs1_b == idex_rd_b) || (id_rs2_b == idex_rd_b));
+    wire b_dep_exmem_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) &&
+                         ((id_rs1_b == exmem_rd_a) || (id_rs2_b == exmem_rd_a));
+    wire b_dep_exmem_b = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) &&
+                         ((id_rs1_b == exmem_rd_b) || (id_rs2_b == exmem_rd_b));
+    wire b_needs_bypass = b_dep_idex_a || b_dep_idex_b || b_dep_exmem_a || b_dep_exmem_b;
+
     wire can_dual_issue = ifid_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
-                          !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a && !a_is_shift;
+                          !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a && !a_is_shift &&
+                          !b_needs_bypass;
 
     // ================================================================
-    // Register file read with WB write-through (4 read ports)
-    // B writes after A (B more recent), so check B first
+    // EX-stage register file reads (moved from ID to save pipeline regs)
     // ================================================================
-    wire [31:0] rf_rs1_a = (id_rs1_a == 5'd0) ? 32'b0 : regs[id_rs1_a];
-    wire [31:0] rf_rs2_a = (id_rs2_a == 5'd0) ? 32'b0 : regs[id_rs2_a];
-    wire [31:0] rf_rs1_b = (id_rs1_b == 5'd0) ? 32'b0 : regs[id_rs1_b];
-    wire [31:0] rf_rs2_b = (id_rs2_b == 5'd0) ? 32'b0 : regs[id_rs2_b];
-
-    wire wt_b_rs1_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs1_a);
-    wire wt_a_rs1_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs1_a) && !wt_b_rs1_a;
-    wire wt_b_rs2_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs2_a);
-    wire wt_a_rs2_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs2_a) && !wt_b_rs2_a;
-
-    wire wt_b_rs1_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs1_b);
-    wire wt_a_rs1_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs1_b) && !wt_b_rs1_b;
-    wire wt_b_rs2_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == id_rs2_b);
-    wire wt_a_rs2_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == id_rs2_b) && !wt_b_rs2_b;
-
-    wire [31:0] id_rs1_val_a = wt_b_rs1_a ? memwb_rd_data_b : (wt_a_rs1_a ? memwb_rd_data_a : rf_rs1_a);
-    wire [31:0] id_rs2_val_a = wt_b_rs2_a ? memwb_rd_data_b : (wt_a_rs2_a ? memwb_rd_data_a : rf_rs2_a);
-    wire [31:0] id_rs1_val_b = wt_b_rs1_b ? memwb_rd_data_b : (wt_a_rs1_b ? memwb_rd_data_a : rf_rs1_b);
-    wire [31:0] id_rs2_val_b = wt_b_rs2_b ? memwb_rd_data_b : (wt_a_rs2_b ? memwb_rd_data_a : rf_rs2_b);
+    wire [31:0] ex_rf_rs1_a = (idex_rs1_a == 5'd0) ? 32'b0 : regs[idex_rs1_a];
+    wire [31:0] ex_rf_rs2_a = (idex_rs2_a == 5'd0) ? 32'b0 : regs[idex_rs2_a];
+    wire [31:0] ex_rf_rs1_b = (idex_rs1_b == 5'd0) ? 32'b0 : regs[idex_rs1_b];
+    wire [31:0] ex_rf_rs2_b = (idex_rs2_b == 5'd0) ? 32'b0 : regs[idex_rs2_b];
 
     // ================================================================
     // Hazard detection (load-use)
@@ -666,7 +665,7 @@ module rv32i_core #(
     wire [31:0] fwd_rs1_a = fwd_emb_rs1_a ? exmem_fwd_b :
                              fwd_ema_rs1_a ? exmem_fwd_a :
                              fwd_mwb_rs1_a ? memwb_rd_data_b :
-                             fwd_mwa_rs1_a ? memwb_rd_data_a : idex_rs1_val_a;
+                             fwd_mwa_rs1_a ? memwb_rd_data_a : ex_rf_rs1_a;
 
     // EX slot A rs2
     wire fwd_emb_rs2_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_a);
@@ -677,29 +676,9 @@ module rv32i_core #(
     wire [31:0] fwd_rs2_a = fwd_emb_rs2_a ? exmem_fwd_b :
                              fwd_ema_rs2_a ? exmem_fwd_a :
                              fwd_mwb_rs2_a ? memwb_rd_data_b :
-                             fwd_mwa_rs2_a ? memwb_rd_data_a : idex_rs2_val_a;
+                             fwd_mwa_rs2_a ? memwb_rd_data_a : ex_rf_rs2_a;
 
-    // EX slot B rs1
-    wire fwd_emb_rs1_b = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_b);
-    wire fwd_ema_rs1_b = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_b) && !fwd_emb_rs1_b;
-    wire fwd_mwb_rs1_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs1_b) && !fwd_emb_rs1_b && !fwd_ema_rs1_b;
-    wire fwd_mwa_rs1_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs1_b) && !fwd_emb_rs1_b && !fwd_ema_rs1_b && !fwd_mwb_rs1_b;
-
-    wire [31:0] fwd_rs1_b = fwd_emb_rs1_b ? exmem_fwd_b :
-                             fwd_ema_rs1_b ? exmem_fwd_a :
-                             fwd_mwb_rs1_b ? memwb_rd_data_b :
-                             fwd_mwa_rs1_b ? memwb_rd_data_a : idex_rs1_val_b;
-
-    // EX slot B rs2
-    wire fwd_emb_rs2_b = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_b);
-    wire fwd_ema_rs2_b = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_b) && !fwd_emb_rs2_b;
-    wire fwd_mwb_rs2_b = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs2_b) && !fwd_emb_rs2_b && !fwd_ema_rs2_b;
-    wire fwd_mwa_rs2_b = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs2_b) && !fwd_emb_rs2_b && !fwd_ema_rs2_b && !fwd_mwb_rs2_b;
-
-    wire [31:0] fwd_rs2_b = fwd_emb_rs2_b ? exmem_fwd_b :
-                             fwd_ema_rs2_b ? exmem_fwd_a :
-                             fwd_mwb_rs2_b ? memwb_rd_data_b :
-                             fwd_mwa_rs2_b ? memwb_rd_data_a : idex_rs2_val_b;
+    // Slot B is bypass-free: uses direct EX-stage RF reads
 
     // ================================================================
     // EX stage -- ALU A (full: ALU + branch + mul/div)
@@ -781,8 +760,8 @@ module rv32i_core #(
     // ================================================================
     // EX stage -- ALU B (ALU + branch, no mul/div/mem)
     // ================================================================
-    wire [31:0] alu_a_b = idex_alu_src_pc_b ? idex_pc_b : fwd_rs1_b;
-    wire [31:0] alu_b_b = idex_alu_src_imm_b ? idex_imm_b : fwd_rs2_b;
+    wire [31:0] alu_a_b = idex_alu_src_pc_b ? idex_pc_b : ex_rf_rs1_b;
+    wire [31:0] alu_b_b = idex_alu_src_imm_b ? idex_imm_b : ex_rf_rs2_b;
 
     wire        alu_do_sub_b = (idex_alu_op_b == 4'b1000) || (idex_alu_op_b == 4'b0010) || (idex_alu_op_b == 4'b0011);
     wire [32:0] alu_ext_b = {1'b0, alu_a_b} + {1'b0, alu_do_sub_b ? ~alu_b_b : alu_b_b} + {32'b0, alu_do_sub_b};
@@ -1019,8 +998,6 @@ module rv32i_core #(
             end else begin
                 idex_valid_a      <= ifid_valid_a;
                 idex_pc_a         <= ifid_pc_a;
-                idex_rs1_val_a    <= id_rs1_val_a;
-                idex_rs2_val_a    <= id_rs2_val_a;
                 idex_imm_a        <= id_imm_a;
                 idex_rd_a         <= id_rd_a;
                 idex_rs1_a        <= id_rs1_a;
@@ -1047,8 +1024,6 @@ module rv32i_core #(
 
                 idex_valid_b      <= ifid_valid_a && can_dual_issue;
                 idex_pc_b         <= ifid_pc_b;
-                idex_rs1_val_b    <= id_rs1_val_b;
-                idex_rs2_val_b    <= id_rs2_val_b;
                 idex_imm_b        <= id_imm_b;
                 idex_rd_b         <= id_rd_b;
                 idex_rs1_b        <= id_rs1_b;
