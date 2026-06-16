@@ -53,24 +53,21 @@ module rv32i_core #(
     logic [1:0]  idex_wb_sel_a;
     logic        idex_valid_a, idex_compressed_a;
 
-    logic [31:0] idex_pc_b, idex_imm_b;
+    logic [31:0] idex_imm_b;
     logic [4:0]  idex_rd_b, idex_rs1_b, idex_rs2_b;
     logic [3:0]  idex_alu_op_b;
     logic [2:0]  idex_funct3_b;
-    logic        idex_alu_src_imm_b, idex_alu_src_pc_b;
+    logic        idex_alu_src_imm_b;
     logic        idex_rd_we_b;
-    logic        idex_is_branch_b, idex_is_jal_b, idex_is_jalr_b;
-    logic [1:0]  idex_wb_sel_b;
-    logic        idex_valid_b, idex_compressed_b;
+    logic        idex_valid_b;
 
     // --- EX/MEM ---
-    logic [31:0] exmem_result_a, exmem_rs2_val_a, exmem_pc4_a;
+    logic [31:0] exmem_result_a, exmem_rs2_val_a;
     logic [4:0]  exmem_rd_a;
     logic [2:0]  exmem_funct3_a;
     logic        exmem_rd_we_a, exmem_mem_read_a, exmem_mem_write_a;
     logic        exmem_is_amo_a, exmem_is_lr_a, exmem_is_sc_a;
     logic [4:0]  exmem_amo_funct5_a;
-    logic [1:0]  exmem_wb_sel_a;
     logic        exmem_is_halt_a, exmem_is_trap_a, exmem_valid_a;
 
     logic [31:0] exmem_fwd_b;
@@ -307,6 +304,9 @@ module rv32i_core #(
     logic [31:0] if_instr_b;
     logic        if_compressed_b;
     logic        if_valid_b;
+    logic [15:0] if_hw_b_sel;
+    logic [31:0] if_word_b_sel;
+    logic        if_b_32_fits;
 
     // Instruction A is always fetchable (PC is 2-byte aligned, window is 8 bytes)
     wire         if_valid_a = 1'b1;
@@ -318,6 +318,9 @@ module rv32i_core #(
         if_instr_b      = 32'h0000_0013;
         if_compressed_b = 1'b0;
         if_valid_b      = 1'b0;
+        if_hw_b_sel     = hw_at_2;
+        if_word_b_sel   = word_at_2;
+        if_b_32_fits    = 1'b1;
 
         // Instruction A decode
         if (if_hw_a[1:0] != 2'b11) begin
@@ -335,37 +338,31 @@ module rv32i_core #(
         // pc_q[1]=0, A 32-bit      -> B at offset 4 in window
         // pc_q[1]=1, A compressed  -> B at offset 4 in window
         // pc_q[1]=1, A 32-bit      -> B at offset 6 in window
+        // Preselect B halfword/word, then single decompress call below
         if (!pc_q[1] && if_hw_a[1:0] != 2'b11) begin
-            // B at offset 2
-            if (hw_at_2[1:0] != 2'b11) begin
-                if_instr_b = decompress(hw_at_2);
-                if_compressed_b = 1'b1;
-                if_valid_b = 1'b1;
-            end else begin
-                if_instr_b = word_at_2;
-                if_compressed_b = 1'b0;
-                if_valid_b = 1'b1;
-            end
+            if_hw_b_sel  = hw_at_2;
+            if_word_b_sel = word_at_2;
+            if_b_32_fits = 1'b1;
         end else if ((!pc_q[1] && if_hw_a[1:0] == 2'b11) ||
                      ( pc_q[1] && if_hw_a[1:0] != 2'b11)) begin
-            // B at offset 4
-            if (hw_at_4[1:0] != 2'b11) begin
-                if_instr_b = decompress(hw_at_4);
-                if_compressed_b = 1'b1;
-                if_valid_b = 1'b1;
-            end else begin
-                if_instr_b = word_at_4;
-                if_compressed_b = 1'b0;
-                if_valid_b = 1'b1;
-            end
+            if_hw_b_sel  = hw_at_4;
+            if_word_b_sel = word_at_4;
+            if_b_32_fits = 1'b1;
         end else begin
-            // B at offset 6 -- only compressed fits
-            if (hw_at_6[1:0] != 2'b11) begin
-                if_instr_b = decompress(hw_at_6);
-                if_compressed_b = 1'b1;
-                if_valid_b = 1'b1;
-            end
-            // else B doesn't fit, if_valid_b stays 0
+            if_hw_b_sel  = hw_at_6;
+            if_word_b_sel = 32'h0000_0013;
+            if_b_32_fits = 1'b0;
+        end
+
+        // Single B decompressor call
+        if (if_hw_b_sel[1:0] != 2'b11) begin
+            if_instr_b = decompress(if_hw_b_sel);
+            if_compressed_b = 1'b1;
+            if_valid_b = 1'b1;
+        end else if (if_b_32_fits) begin
+            if_instr_b = if_word_b_sel;
+            if_compressed_b = 1'b0;
+            if_valid_b = 1'b1;
         end
     end
 
@@ -592,8 +589,10 @@ module rv32i_core #(
     // ================================================================
     wire b_is_shift = (id_opcode_b == OP_IMM || id_opcode_b == OP_REG) &&
                       (id_funct3_b == 3'b001 || id_funct3_b == 3'b101);
+    wire b_is_control = (id_opcode_b == OP_BRANCH) || (id_opcode_b == OP_JAL) ||
+                        (id_opcode_b == OP_JALR) || (id_opcode_b == OP_AUIPC);
     wire b_structural = id_mem_read_b || id_mem_write_b || id_is_amo_b || id_is_lr_b || id_is_sc_b ||
-                        id_is_muldiv_b || id_is_halt_b || id_is_trap_b || b_is_shift;
+                        id_is_muldiv_b || id_is_halt_b || id_is_trap_b || b_is_shift || b_is_control;
     wire b_raw = id_rd_we_a && (id_rd_a != 5'd0) &&
                  ((id_rs1_b == id_rd_a) || (id_rs2_b == id_rd_a));
     wire b_waw = id_rd_we_a && id_rd_we_b && (id_rd_a != 5'd0) && (id_rd_a == id_rd_b);
@@ -654,7 +653,7 @@ module rv32i_core #(
     // ================================================================
     // Forwarding (4 sources: exmem_b > exmem_a > memwb_b > memwb_a)
     // ================================================================
-    wire [31:0] exmem_fwd_a = (exmem_wb_sel_a == WB_PC4) ? exmem_pc4_a : exmem_result_a;
+    wire [31:0] exmem_fwd_a = exmem_result_a;
 
     // EX slot A rs1
     wire fwd_emb_rs1_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_a);
@@ -760,7 +759,7 @@ module rv32i_core #(
     // ================================================================
     // EX stage -- ALU B (ALU + branch, no mul/div/mem)
     // ================================================================
-    wire [31:0] alu_a_b = idex_alu_src_pc_b ? idex_pc_b : ex_rf_rs1_b;
+    wire [31:0] alu_a_b = ex_rf_rs1_b;  // no AUIPC in slot B
     wire [31:0] alu_b_b = idex_alu_src_imm_b ? idex_imm_b : ex_rf_rs2_b;
 
     wire        alu_do_sub_b = (idex_alu_op_b == 4'b1000) || (idex_alu_op_b == 4'b0010) || (idex_alu_op_b == 4'b0011);
@@ -783,36 +782,14 @@ module rv32i_core #(
         endcase
     end
 
-    logic branch_taken_b;
-    always_comb begin
-        branch_taken_b = 1'b0;
-        if (idex_is_branch_b) begin
-            case (idex_funct3_b)
-                3'b000:  branch_taken_b = (alu_sum_b == 32'b0);
-                3'b001:  branch_taken_b = (alu_sum_b != 32'b0);
-                3'b100:  branch_taken_b = alu_lt_b;
-                3'b101:  branch_taken_b = !alu_lt_b;
-                3'b110:  branch_taken_b = alu_ltu_b;
-                3'b111:  branch_taken_b = !alu_ltu_b;
-                default: ;
-            endcase
-        end
-    end
-
-    wire [31:0] branch_target_b = idex_pc_b + idex_imm_b;
-    wire [31:0] ex_pc4_b = idex_pc_b + (idex_compressed_b ? 32'd2 : 32'd4);
-
-    wire redirect_b = idex_valid_b && !redirect_a &&
-                      (idex_is_jal_b || idex_is_jalr_b || branch_taken_b);
-    wire [31:0] redirect_target_b = idex_is_jalr_b ? {alu_result_b[31:1], 1'b0} : branch_target_b;
-
+    // Slot B: no branch/redirect (control flow restricted to slot A)
     wire [31:0] ex_result_b = alu_result_b;
 
     // ================================================================
     // Pipeline control
     // ================================================================
-    wire redirect = redirect_a || redirect_b;
-    wire [31:0] redirect_target = redirect_a ? redirect_target_a : redirect_target_b;
+    wire redirect = redirect_a;
+    wire [31:0] redirect_target = redirect_target_a;
 
     wire stall_muldiv = idex_valid_a && (idex_is_muldiv_a || idex_is_shift_a) && !md_ready;
     wire stall_load   = load_use;
@@ -904,8 +881,8 @@ module rv32i_core #(
 
     wire [31:0] mem_rd_data_a = exmem_is_sc_a  ? {31'b0, ~sc_success} :
                                 (exmem_is_amo_a || exmem_is_lr_a) ? dmem_rdata_i :
-                                (exmem_wb_sel_a == WB_MEM) ? load_data :
-                                (exmem_wb_sel_a == WB_PC4) ? exmem_pc4_a : exmem_result_a;
+                                exmem_mem_read_a ? load_data :
+                                exmem_result_a;
 
     wire [31:0] mem_rd_data_b = exmem_fwd_b;
 
@@ -967,15 +944,13 @@ module rv32i_core #(
                 exmem_valid_b <= 1'b0;
             end else begin
                 exmem_valid_a     <= idex_valid_a;
-                exmem_result_a    <= ex_result_a;
+                exmem_result_a    <= (idex_wb_sel_a == WB_PC4) ? ex_pc4_a : ex_result_a;
                 exmem_rs2_val_a   <= fwd_rs2_a;
-                exmem_pc4_a       <= ex_pc4_a;
                 exmem_rd_a        <= idex_rd_a;
                 exmem_funct3_a    <= idex_funct3_a;
                 exmem_rd_we_a     <= idex_rd_we_a && !idex_is_trap_a && !idex_is_halt_a;
                 exmem_mem_read_a  <= idex_mem_read_a;
                 exmem_mem_write_a <= idex_mem_write_a && !idex_is_trap_a && !idex_is_halt_a;
-                exmem_wb_sel_a    <= idex_wb_sel_a;
                 exmem_is_halt_a   <= idex_is_halt_a;
                 exmem_is_trap_a   <= idex_is_trap_a;
                 exmem_is_amo_a    <= idex_is_amo_a;
@@ -984,7 +959,7 @@ module rv32i_core #(
                 exmem_amo_funct5_a<= idex_amo_funct5_a;
 
                 exmem_valid_b     <= redirect_a ? 1'b0 : idex_valid_b;
-                exmem_fwd_b       <= (idex_wb_sel_b == WB_PC4) ? ex_pc4_b : ex_result_b;
+                exmem_fwd_b       <= ex_result_b;
                 exmem_rd_b        <= idex_rd_b;
                 exmem_rd_we_b     <= idex_rd_we_b;
             end
@@ -1023,7 +998,6 @@ module rv32i_core #(
                 idex_compressed_a <= ifid_compressed_a;
 
                 idex_valid_b      <= ifid_valid_a && can_dual_issue;
-                idex_pc_b         <= ifid_pc_b;
                 idex_imm_b        <= id_imm_b;
                 idex_rd_b         <= id_rd_b;
                 idex_rs1_b        <= id_rs1_b;
@@ -1031,13 +1005,7 @@ module rv32i_core #(
                 idex_alu_op_b     <= id_alu_op_b;
                 idex_funct3_b     <= id_funct3_b;
                 idex_alu_src_imm_b<= id_alu_src_imm_b;
-                idex_alu_src_pc_b <= id_alu_src_pc_b;
                 idex_rd_we_b      <= id_rd_we_b;
-                idex_is_branch_b  <= id_is_branch_b;
-                idex_is_jal_b     <= id_is_jal_b;
-                idex_is_jalr_b    <= id_is_jalr_b;
-                idex_wb_sel_b     <= id_wb_sel_b;
-                idex_compressed_b <= ifid_compressed_b;
             end
 
             // ---- IF/ID ----
