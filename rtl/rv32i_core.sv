@@ -25,6 +25,12 @@ module rv32i_core #(
 
     localparam [1:0] WB_EX = 2'b00, WB_MEM = 2'b01, WB_PC4 = 2'b10;
 
+    // Compact control-flow encoding (saves DFFE+decode area vs 3 separate bits)
+    localparam [1:0] CF_NONE = 2'd0, CF_BRANCH = 2'd1, CF_JAL = 2'd2, CF_JALR = 2'd3;
+
+    // Compact AMO type encoding (saves DFFE+decode area vs 3 separate bits)
+    localparam [1:0] AMO_NONE = 2'd0, AMO_LR = 2'd1, AMO_SC = 2'd2, AMO_RMW = 2'd3;
+
     // ================================================================
     // Register file  (x0 hardwired to 0)
     // ================================================================
@@ -49,17 +55,24 @@ module rv32i_core #(
     logic [2:0]  idex_funct3_a;
     logic        idex_alu_src_imm_a, idex_alu_src_pc_a;
     logic        idex_mem_read_a, idex_mem_write_a, idex_rd_we_a;
-    logic        idex_is_branch_a, idex_is_jal_a, idex_is_jalr_a;
+    logic [1:0]  idex_cf_a;  // CF_NONE / CF_BRANCH / CF_JAL / CF_JALR
     logic        idex_is_muldiv_a, idex_is_halt_a, idex_is_trap_a;
-    logic        idex_is_amo_a, idex_is_lr_a, idex_is_sc_a;
+    logic [1:0]  idex_amo_type_a;  // AMO_NONE / AMO_LR / AMO_SC / AMO_RMW
     logic [4:0]  idex_amo_funct5_a;
     logic [1:0]  idex_wb_sel_a;
     logic        idex_valid_a, idex_compressed_a;
 
+    // Derived signals from compact encodings
+    wire idex_is_branch_a = (idex_cf_a == CF_BRANCH);
+    wire idex_is_jal_a    = (idex_cf_a == CF_JAL);
+    wire idex_is_jalr_a   = (idex_cf_a == CF_JALR);
+    wire idex_is_amo_a    = (idex_amo_type_a == AMO_RMW);
+    wire idex_is_lr_a     = (idex_amo_type_a == AMO_LR);
+    wire idex_is_sc_a     = (idex_amo_type_a == AMO_SC);
+
     logic [31:0] idex_imm_b;
     logic [4:0]  idex_rd_b, idex_rs1_b, idex_rs2_b;
     logic [3:0]  idex_alu_op_b;
-    logic [2:0]  idex_funct3_b;
     logic        idex_alu_src_imm_b;
     logic        idex_rd_we_b;
     logic        idex_valid_b;
@@ -69,19 +82,21 @@ module rv32i_core #(
     logic [4:0]  exmem_rd_a;
     logic [2:0]  exmem_funct3_a;
     logic        exmem_rd_we_a, exmem_mem_read_a, exmem_mem_write_a;
-    logic        exmem_is_amo_a, exmem_is_lr_a, exmem_is_sc_a;
+    logic [1:0]  exmem_amo_type_a;  // AMO_NONE / AMO_LR / AMO_SC / AMO_RMW
     logic [4:0]  exmem_amo_funct5_a;
     logic        exmem_is_halt_a, exmem_is_trap_a, exmem_valid_a;
+
+    // Derived signals from compact encoding
+    wire exmem_is_amo_a = (exmem_amo_type_a == AMO_RMW);
+    wire exmem_is_lr_a  = (exmem_amo_type_a == AMO_LR);
+    wire exmem_is_sc_a  = (exmem_amo_type_a == AMO_SC);
 
     logic [31:0] exmem_fwd_b;
     logic [4:0]  exmem_rd_b;
     logic        exmem_rd_we_b;
     logic        exmem_valid_b;
 
-    // --- MEM/WB ---
-    logic [31:0] memwb_rd_data_a;
-    logic [4:0]  memwb_rd_a;
-    logic        memwb_rd_we_a, memwb_is_halt_a, memwb_is_trap_a, memwb_valid_a;
+    // --- MEM/WB eliminated: register file write now happens directly from EXMEM ---
 
     // ================================================================
     // Mul/Div shared state (iterative, mutually exclusive)
@@ -644,27 +659,23 @@ module rv32i_core #(
     wire load_use = load_use_a || load_use_b_from_exa;
 
     // ================================================================
-    // Forwarding (3 sources: exmem_b > exmem_a > memwb_a)
+    // Forwarding (2 sources: exmem_b > exmem_a; MEMWB handled by stall)
     // ================================================================
     wire [31:0] exmem_fwd_a = exmem_result_a;
 
-    // EX slot A rs1 (3 sources: exmem_b > exmem_a > memwb_a; B writes early so RF has it)
+    // EX slot A rs1 (2 sources: exmem_b > exmem_a)
     wire fwd_emb_rs1_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_a);
     wire fwd_ema_rs1_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_a) && !fwd_emb_rs1_a;
-    wire fwd_mwa_rs1_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs1_a) && !fwd_emb_rs1_a && !fwd_ema_rs1_a;
 
     wire [31:0] fwd_rs1_a = fwd_emb_rs1_a ? exmem_fwd_b :
-                             fwd_ema_rs1_a ? exmem_fwd_a :
-                             fwd_mwa_rs1_a ? memwb_rd_data_a : ex_rf_rs1_a;
+                             fwd_ema_rs1_a ? exmem_fwd_a : ex_rf_rs1_a;
 
-    // EX slot A rs2 (3 sources: exmem_b > exmem_a > memwb_a)
+    // EX slot A rs2 (2 sources: exmem_b > exmem_a)
     wire fwd_emb_rs2_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_a);
     wire fwd_ema_rs2_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_a) && !fwd_emb_rs2_a;
-    wire fwd_mwa_rs2_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs2_a) && !fwd_emb_rs2_a && !fwd_ema_rs2_a;
 
     wire [31:0] fwd_rs2_a = fwd_emb_rs2_a ? exmem_fwd_b :
-                             fwd_ema_rs2_a ? exmem_fwd_a :
-                             fwd_mwa_rs2_a ? memwb_rd_data_a : ex_rf_rs2_a;
+                             fwd_ema_rs2_a ? exmem_fwd_a : ex_rf_rs2_a;
 
     // Slot B is bypass-free: uses direct EX-stage RF reads
 
@@ -782,8 +793,16 @@ module rv32i_core #(
 
     wire stall_muldiv = idex_valid_a && (idex_is_muldiv_a || idex_is_shift_a) && !md_ready;
     wire stall_load   = load_use;
-    wire stall_pipe   = stall_muldiv || stall_load;
     wire flush      = redirect || (idex_valid_a && (idex_is_trap_a || idex_is_halt_a));
+
+    // Stall when ID-stage instruction depends on EXMEM_A (would need MEMWB forwarding)
+    // By stalling, the producer completes WB before consumer reaches EX, so RF has the value.
+    // EXMEM_B writes early to RF from EXMEM stage, so no stall needed for B dependencies.
+    // Must not stall when a flush is pending (redirect/halt/trap kills the IFID instruction anyway).
+    wire stall_exmem_dep = !flush && exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && ifid_valid_a &&
+        ((id_uses_rs1_a && exmem_rd_a == id_rs1_a) || (id_uses_rs2_a && exmem_rd_a == id_rs2_a));
+
+    wire stall_pipe   = stall_muldiv || stall_load || stall_exmem_dep;
 
     wire halted = halt_o || trap_o;
 
@@ -895,7 +914,6 @@ module rv32i_core #(
             idex_valid_b    <= 1'b0;
             exmem_valid_a   <= 1'b0;
             exmem_valid_b   <= 1'b0;
-            memwb_valid_a   <= 1'b0;
             trap_o          <= 1'b0;
             halt_o          <= 1'b0;
             md_active       <= 1'b0;
@@ -903,23 +921,15 @@ module rv32i_core #(
         end else if (halted) begin
             // frozen
         end else begin
-            // ---- WB: register file write ----
-            if (memwb_valid_a && memwb_rd_we_a && memwb_rd_a != 5'd0)
-                regs[memwb_rd_a] <= memwb_rd_data_a;
+            // ---- WB: register file write directly from MEM stage ----
+            if (exmem_valid_a && exmem_rd_we_a && exmem_rd_a != 5'd0)
+                regs[exmem_rd_a] <= mem_rd_data_a;
             // Early B writeback from EXMEM (after A so younger B wins on same-rd)
             if (exmem_valid_b && exmem_rd_we_b && exmem_rd_b != 5'd0)
                 regs[exmem_rd_b] <= exmem_fwd_b;
 
-            if (memwb_valid_a && memwb_is_trap_a) trap_o <= 1'b1;
-            if (memwb_valid_a && memwb_is_halt_a) halt_o <= 1'b1;
-
-            // ---- MEM/WB ----
-            memwb_valid_a   <= exmem_valid_a;
-            memwb_rd_a      <= exmem_rd_a;
-            memwb_rd_we_a   <= exmem_valid_a ? exmem_rd_we_a : 1'b0;
-            memwb_rd_data_a <= mem_rd_data_a;
-            memwb_is_halt_a <= exmem_valid_a && exmem_is_halt_a;
-            memwb_is_trap_a <= exmem_valid_a && exmem_is_trap_a;
+            if (exmem_valid_a && exmem_is_trap_a) trap_o <= 1'b1;
+            if (exmem_valid_a && exmem_is_halt_a) halt_o <= 1'b1;
 
             // ---- EX/MEM ----
             if (stall_muldiv) begin
@@ -936,9 +946,7 @@ module rv32i_core #(
                 exmem_mem_write_a <= idex_mem_write_a && !idex_is_trap_a && !idex_is_halt_a;
                 exmem_is_halt_a   <= idex_is_halt_a;
                 exmem_is_trap_a   <= idex_is_trap_a;
-                exmem_is_amo_a    <= idex_is_amo_a;
-                exmem_is_lr_a     <= idex_is_lr_a;
-                exmem_is_sc_a     <= idex_is_sc_a;
+                exmem_amo_type_a  <= idex_amo_type_a;
                 exmem_amo_funct5_a<= idex_amo_funct5_a;
 
                 exmem_valid_b     <= redirect_a ? 1'b0 : idex_valid_b;
@@ -950,7 +958,7 @@ module rv32i_core #(
             // ---- ID/EX ----
             if (stall_muldiv) begin
                 // hold
-            end else if (flush || stall_load) begin
+            end else if (flush || stall_load || stall_exmem_dep) begin
                 idex_valid_a <= 1'b0;
                 idex_valid_b <= 1'b0;
             end else begin
@@ -967,16 +975,16 @@ module rv32i_core #(
                 idex_mem_read_a   <= id_mem_read_a;
                 idex_mem_write_a  <= id_mem_write_a;
                 idex_rd_we_a      <= id_rd_we_a;
-                idex_is_branch_a  <= id_is_branch_a;
-                idex_is_jal_a     <= id_is_jal_a;
-                idex_is_jalr_a    <= id_is_jalr_a;
+                idex_cf_a         <= id_is_branch_a ? CF_BRANCH :
+                                     id_is_jal_a    ? CF_JAL :
+                                     id_is_jalr_a   ? CF_JALR : CF_NONE;
                 idex_is_muldiv_a  <= id_is_muldiv_a;
                 idex_wb_sel_a     <= id_wb_sel_a;
                 idex_is_halt_a    <= id_is_halt_a;
                 idex_is_trap_a    <= id_is_trap_a;
-                idex_is_amo_a     <= id_is_amo_a;
-                idex_is_lr_a      <= id_is_lr_a;
-                idex_is_sc_a      <= id_is_sc_a;
+                idex_amo_type_a   <= id_is_lr_a  ? AMO_LR :
+                                     id_is_sc_a  ? AMO_SC :
+                                     id_is_amo_a ? AMO_RMW : AMO_NONE;
                 idex_amo_funct5_a <= id_amo_funct5_a;
                 idex_compressed_a <= ifid_compressed_a;
 
@@ -986,7 +994,6 @@ module rv32i_core #(
                 idex_rs1_b        <= id_rs1_b;
                 idex_rs2_b        <= id_rs2_b;
                 idex_alu_op_b     <= id_alu_op_b;
-                idex_funct3_b     <= id_funct3_b;
                 idex_alu_src_imm_b<= id_alu_src_imm_b;
                 idex_rd_we_b      <= id_rd_we_b;
             end
