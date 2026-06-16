@@ -36,8 +36,11 @@ module rv32i_core #(
     // --- IF/ID ---
     logic [31:0] ifid_pc_a, ifid_instr_a;
     logic        ifid_valid_a, ifid_compressed_a;
-    logic [31:0] ifid_pc_b, ifid_instr_b;
+    logic [31:0] ifid_instr_b;
     logic        ifid_valid_b, ifid_compressed_b;
+
+    // B's PC is always derivable from A
+    wire [31:0] ifid_pc_b = ifid_pc_a + (ifid_compressed_a ? 32'd2 : 32'd4);
 
     // --- ID/EX ---
     logic [31:0] idex_pc_a, idex_imm_a;
@@ -79,10 +82,6 @@ module rv32i_core #(
     logic [31:0] memwb_rd_data_a;
     logic [4:0]  memwb_rd_a;
     logic        memwb_rd_we_a, memwb_is_halt_a, memwb_is_trap_a, memwb_valid_a;
-
-    logic [31:0] memwb_rd_data_b;
-    logic [4:0]  memwb_rd_b;
-    logic        memwb_rd_we_b, memwb_valid_b;
 
     // ================================================================
     // Mul/Div shared state (iterative, mutually exclusive)
@@ -369,12 +368,6 @@ module rv32i_core #(
     wire [31:0] if_pc_after_b = if_next_pc + (if_compressed_b ? 32'd2 : 32'd4);
 
     // ================================================================
-    // Held instruction buffer -- for when slot B can't dual-issue
-    // ================================================================
-    logic [31:0] held_pc, held_instr;
-    logic        held_valid, held_compressed;
-
-    // ================================================================
     // Decode helpers for a generic instruction
     // ================================================================
 
@@ -651,30 +644,26 @@ module rv32i_core #(
     wire load_use = load_use_a || load_use_b_from_exa;
 
     // ================================================================
-    // Forwarding (4 sources: exmem_b > exmem_a > memwb_b > memwb_a)
+    // Forwarding (3 sources: exmem_b > exmem_a > memwb_a)
     // ================================================================
     wire [31:0] exmem_fwd_a = exmem_result_a;
 
-    // EX slot A rs1
+    // EX slot A rs1 (3 sources: exmem_b > exmem_a > memwb_a; B writes early so RF has it)
     wire fwd_emb_rs1_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_a);
     wire fwd_ema_rs1_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_a) && !fwd_emb_rs1_a;
-    wire fwd_mwb_rs1_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs1_a) && !fwd_emb_rs1_a && !fwd_ema_rs1_a;
-    wire fwd_mwa_rs1_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs1_a) && !fwd_emb_rs1_a && !fwd_ema_rs1_a && !fwd_mwb_rs1_a;
+    wire fwd_mwa_rs1_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs1_a) && !fwd_emb_rs1_a && !fwd_ema_rs1_a;
 
     wire [31:0] fwd_rs1_a = fwd_emb_rs1_a ? exmem_fwd_b :
                              fwd_ema_rs1_a ? exmem_fwd_a :
-                             fwd_mwb_rs1_a ? memwb_rd_data_b :
                              fwd_mwa_rs1_a ? memwb_rd_data_a : ex_rf_rs1_a;
 
-    // EX slot A rs2
+    // EX slot A rs2 (3 sources: exmem_b > exmem_a > memwb_a)
     wire fwd_emb_rs2_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_a);
     wire fwd_ema_rs2_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_a) && !fwd_emb_rs2_a;
-    wire fwd_mwb_rs2_a = memwb_valid_b && memwb_rd_we_b && (memwb_rd_b != 5'd0) && (memwb_rd_b == idex_rs2_a) && !fwd_emb_rs2_a && !fwd_ema_rs2_a;
-    wire fwd_mwa_rs2_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs2_a) && !fwd_emb_rs2_a && !fwd_ema_rs2_a && !fwd_mwb_rs2_a;
+    wire fwd_mwa_rs2_a = memwb_valid_a && memwb_rd_we_a && (memwb_rd_a != 5'd0) && (memwb_rd_a == idex_rs2_a) && !fwd_emb_rs2_a && !fwd_ema_rs2_a;
 
     wire [31:0] fwd_rs2_a = fwd_emb_rs2_a ? exmem_fwd_b :
                              fwd_ema_rs2_a ? exmem_fwd_a :
-                             fwd_mwb_rs2_a ? memwb_rd_data_b :
                              fwd_mwa_rs2_a ? memwb_rd_data_a : ex_rf_rs2_a;
 
     // Slot B is bypass-free: uses direct EX-stage RF reads
@@ -884,7 +873,7 @@ module rv32i_core #(
                                 exmem_mem_read_a ? load_data :
                                 exmem_result_a;
 
-    wire [31:0] mem_rd_data_b = exmem_fwd_b;
+    // Slot B writes early from EXMEM (no MEM/WB stage for B)
 
     // ================================================================
     // Sequential logic
@@ -895,7 +884,7 @@ module rv32i_core #(
     wire did_dual_issue = !stall_pipe && !flush && ifid_valid_a && can_dual_issue;
 
     // Signal: did we hold slot B this cycle?
-    wire do_hold_b = !stall_pipe && !flush && ifid_valid_a && ifid_valid_b && !can_dual_issue && !held_valid;
+    wire do_hold_b = !stall_pipe && !flush && ifid_valid_a && ifid_valid_b && !can_dual_issue;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -907,20 +896,19 @@ module rv32i_core #(
             exmem_valid_a   <= 1'b0;
             exmem_valid_b   <= 1'b0;
             memwb_valid_a   <= 1'b0;
-            memwb_valid_b   <= 1'b0;
             trap_o          <= 1'b0;
             halt_o          <= 1'b0;
             md_active       <= 1'b0;
             resv_valid      <= 1'b0;
-            held_valid      <= 1'b0;
         end else if (halted) begin
             // frozen
         end else begin
             // ---- WB: register file write ----
             if (memwb_valid_a && memwb_rd_we_a && memwb_rd_a != 5'd0)
                 regs[memwb_rd_a] <= memwb_rd_data_a;
-            if (memwb_valid_b && memwb_rd_we_b && memwb_rd_b != 5'd0)
-                regs[memwb_rd_b] <= memwb_rd_data_b;
+            // Early B writeback from EXMEM (after A so younger B wins on same-rd)
+            if (exmem_valid_b && exmem_rd_we_b && exmem_rd_b != 5'd0)
+                regs[exmem_rd_b] <= exmem_fwd_b;
 
             if (memwb_valid_a && memwb_is_trap_a) trap_o <= 1'b1;
             if (memwb_valid_a && memwb_is_halt_a) halt_o <= 1'b1;
@@ -932,11 +920,6 @@ module rv32i_core #(
             memwb_rd_data_a <= mem_rd_data_a;
             memwb_is_halt_a <= exmem_valid_a && exmem_is_halt_a;
             memwb_is_trap_a <= exmem_valid_a && exmem_is_trap_a;
-
-            memwb_valid_b   <= exmem_valid_b;
-            memwb_rd_b      <= exmem_rd_b;
-            memwb_rd_we_b   <= exmem_valid_b ? exmem_rd_we_b : 1'b0;
-            memwb_rd_data_b <= mem_rd_data_b;
 
             // ---- EX/MEM ----
             if (stall_muldiv) begin
@@ -1010,32 +993,19 @@ module rv32i_core #(
 
             // ---- IF/ID ----
             if (stall_pipe) begin
-                // hold IF/ID and held state
+                // hold IF/ID
             end else if (flush) begin
                 ifid_valid_a <= 1'b0;
                 ifid_valid_b <= 1'b0;
-                held_valid   <= 1'b0;
             end else if (do_hold_b) begin
-                // IFID_A is being consumed by IDEX this cycle (above).
-                // IFID_B can't dual-issue -- hold it for next cycle.
-                // Insert bubble into IFID so next cycle the held replay takes effect.
-                ifid_valid_a      <= 1'b0;
-                ifid_valid_b      <= 1'b0;
-                held_valid        <= 1'b1;
-                held_pc           <= ifid_pc_b;
-                held_instr        <= ifid_instr_b;
-                held_compressed   <= ifid_compressed_b;
-            end else if (held_valid) begin
-                // Replay held instruction as slot A, fetch from memory as slot B
+                // Rotate: B becomes next cycle's A, fetch new instruction for B
                 ifid_valid_a      <= 1'b1;
-                ifid_pc_a         <= held_pc;
-                ifid_instr_a      <= held_instr;
-                ifid_compressed_a <= held_compressed;
+                ifid_pc_a         <= ifid_pc_b;
+                ifid_instr_a      <= ifid_instr_b;
+                ifid_compressed_a <= ifid_compressed_b;
                 ifid_valid_b      <= if_valid_a;
-                ifid_pc_b         <= pc_q;
                 ifid_instr_b      <= if_instr_a;
                 ifid_compressed_b <= if_compressed_a;
-                held_valid        <= 1'b0;
             end else begin
                 // Normal fetch: load both slots from memory
                 ifid_valid_a      <= if_valid_a;
@@ -1043,7 +1013,6 @@ module rv32i_core #(
                 ifid_instr_a      <= if_instr_a;
                 ifid_compressed_a <= if_compressed_a;
                 ifid_valid_b      <= if_valid_b;
-                ifid_pc_b         <= if_next_pc;
                 ifid_instr_b      <= if_instr_b;
                 ifid_compressed_b <= if_compressed_b;
             end
@@ -1051,15 +1020,9 @@ module rv32i_core #(
             // ---- PC update ----
             if (redirect) begin
                 pc_q <= redirect_target;
-                held_valid <= 1'b0;
             end else if (!stall_pipe) begin
                 if (do_hold_b) begin
-                    // Holding IFID_B. Next cycle we replay held + fetch.
-                    // PC should point to the instruction AFTER the held one.
-                    pc_q <= ifid_pc_b + (ifid_compressed_b ? 32'd2 : 32'd4);
-                end else if (held_valid) begin
-                    // Replaying held as IFID_A, fetching if_instr_a as IFID_B.
-                    // Advance PC past the newly fetched instruction.
+                    // B rotated to A; fetch one new instruction for B
                     pc_q <= if_next_pc;
                 end else if (if_valid_b) begin
                     pc_q <= if_pc_after_b;
