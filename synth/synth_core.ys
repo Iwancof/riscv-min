@@ -10,12 +10,19 @@ opt
 
 wreduce
 peepopt
+share
 opt -full
 
 techmap
 opt -full
 
 dfflibmap -liberty synth/generic_cmos.lib
+abc -liberty synth/generic_cmos.lib -D 1
+opt_clean
+abc -liberty synth/generic_cmos.lib -D 1
+opt_clean
+abc -liberty synth/generic_cmos.lib -D 1
+opt_clean
 abc -liberty synth/generic_cmos.lib -D 1
 opt_clean
 abc -liberty synth/generic_cmos.lib -D 1
