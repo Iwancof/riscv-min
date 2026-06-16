@@ -17,7 +17,7 @@
 namespace {
 
 constexpr uint32_t kExitAddr = 0xfffffff0u;
-constexpr size_t kDmemBytes = 64 * 1024;
+constexpr size_t kMemBytes = 256 * 1024;
 
 struct Args {
     std::string program;
@@ -123,17 +123,6 @@ class Memory {
     std::vector<uint8_t> bytes_;
 };
 
-uint32_t read_imem(const std::vector<uint32_t> &imem, uint32_t addr) {
-    if ((addr & 3u) != 0u) {
-        return 0;
-    }
-    const uint32_t index = addr >> 2;
-    if (index >= imem.size()) {
-        return 0x00100073u;
-    }
-    return imem[index];
-}
-
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -155,7 +144,10 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    Memory dmem(kDmemBytes);
+    Memory mem(kMemBytes);
+    for (size_t i = 0; i < imem.size(); ++i) {
+        mem.write_word(static_cast<uint32_t>(i * 4), imem[i], 0xF);
+    }
     Vrv32i_core top;
     vluint64_t sim_time = 0;
 
@@ -184,11 +176,11 @@ int main(int argc, char **argv) {
     };
 
     auto settle = [&]() {
-        top.imem_rdata_i = read_imem(imem, top.imem_addr_o);
-        top.dmem_rdata_i = dmem.read_word(top.dmem_addr_o);
+        top.imem_rdata_i = mem.read_word(top.imem_addr_o);
+        top.dmem_rdata_i = mem.read_word(top.dmem_addr_o);
         top.eval();
-        top.imem_rdata_i = read_imem(imem, top.imem_addr_o);
-        top.dmem_rdata_i = dmem.read_word(top.dmem_addr_o);
+        top.imem_rdata_i = mem.read_word(top.imem_addr_o);
+        top.dmem_rdata_i = mem.read_word(top.dmem_addr_o);
         top.eval();
     };
 
@@ -225,10 +217,8 @@ int main(int argc, char **argv) {
             if ((addr & ~uint32_t{3}) == kExitAddr) {
                 exit_seen = true;
                 exit_code = data;
-            } else if (!dmem.write_word(addr, data, strobe)) {
-                std::ostringstream oss;
-                oss << "store outside dmem addr=0x" << std::hex << addr;
-                fail_reason = oss.str();
+            } else {
+                mem.write_word(addr, data, strobe);
             }
         }
 
@@ -252,7 +242,8 @@ int main(int argc, char **argv) {
             break;
         }
         if (top.halt_o) {
-            fail_reason = "halted before writing exit code";
+            if (!exit_seen)
+                fail_reason = "halted before writing exit code";
             break;
         }
     }

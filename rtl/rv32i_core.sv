@@ -784,7 +784,7 @@ module rv32i_core #(
                 ifid_valid  <= 1'b0;
             end else begin
                 ifid_valid      <= 1'b1;
-                ifid_pc         <= pc_q;
+                ifid_pc         <= hwbuf_valid ? (pc_q - 32'd2) : pc_q;
                 ifid_instr      <= if_instr;
                 ifid_compressed <= if_is_compressed;
                 if (hwbuf_valid)
