@@ -90,4 +90,16 @@ library(generic_cmos) {
     pin(D) { direction : input; capacitance : 0.01; }
     pin(Q) { direction : output; function : "IQ"; }
   }
+
+  cell(DFFEPOSX1) {
+    area : 7.5;
+    ff(IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "(EN D) + (!EN IQ)";
+    }
+    pin(CLK) { direction : input; clock : true; capacitance : 0.01; }
+    pin(EN)  { direction : input; capacitance : 0.01; }
+    pin(D)   { direction : input; capacitance : 0.01; }
+    pin(Q)   { direction : output; function : "IQ"; }
+  }
 }

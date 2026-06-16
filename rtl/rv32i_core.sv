@@ -89,16 +89,19 @@ module rv32i_core #(
     logic        memwb_rd_we_b, memwb_valid_b;
 
     // ================================================================
-    // Divider state
+    // Mul/Div shared state (iterative, mutually exclusive)
     // ================================================================
-    logic        div_active;
-    logic [5:0]  div_cnt;
-    logic [31:0] div_quot, div_rem, div_dvsr;
-    logic        div_nq, div_nr, div_bz;
-    logic [31:0] div_raw_dividend;
+    logic        md_active;
+    logic        md_is_mul;
+    logic [5:0]  md_cnt;
+    logic [31:0] md_lo, md_hi, md_b;
+    logic        md_nq, md_nr, md_bz;
+    logic [31:0] md_raw_dividend;
+    logic        md_negate, md_hi_result;
 
-    wire [32:0] div_trial = {div_rem, div_quot[31]} - {1'b0, div_dvsr};
-    wire        div_ready = div_active && (div_cnt == 6'd0);
+    wire [32:0] div_trial   = {md_hi, md_lo[31]} - {1'b0, md_b};
+    wire [32:0] mul_partial = {1'b0, md_hi} + {1'b0, md_b};
+    wire        md_ready    = md_active && (md_cnt == 6'd0);
 
     // ================================================================
     // A extension -- LR/SC reservation set
@@ -594,7 +597,7 @@ module rv32i_core #(
     wire a_is_redirect = id_is_jal_a || id_is_jalr_a || id_is_branch_a;
 
     wire can_dual_issue = ifid_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
-                          !id_is_halt_a && !id_is_trap_a;
+                          !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a;
 
     // ================================================================
     // Register file read with WB write-through (4 read ports)
@@ -746,28 +749,28 @@ module rv32i_core #(
                       (idex_is_jal_a || idex_is_jalr_a || branch_taken_a);
     wire [31:0] redirect_target_a = idex_is_jalr_a ? {alu_result_a[31:1], 1'b0} : branch_target_a;
 
-    // M extension -- multiply (slot A only)
-    wire        mul_a_signed = (idex_funct3_a == 3'b001 || idex_funct3_a == 3'b010);
-    wire        mul_b_signed = (idex_funct3_a == 3'b001);
-    wire signed [32:0] mul_op_a = {mul_a_signed ? fwd_rs1_a[31] : 1'b0, fwd_rs1_a};
-    wire signed [32:0] mul_op_b = {mul_b_signed ? fwd_rs2_a[31] : 1'b0, fwd_rs2_a};
-    wire signed [65:0] mul_prod = mul_op_a * mul_op_b;
-    wire [31:0] mul_result = (idex_funct3_a[1:0] == 2'b00) ? mul_prod[31:0] : mul_prod[63:32];
-
+    // M extension -- iterative multiply / divide (slot A only)
     wire idex_is_mul_a = idex_is_muldiv_a && !idex_funct3_a[2];
     wire idex_is_div_a = idex_is_muldiv_a && idex_funct3_a[2];
-    wire start_div     = idex_valid_a && idex_is_div_a && !div_active;
+    wire start_muldiv  = idex_valid_a && idex_is_muldiv_a && !md_active;
 
     wire        div_signed = !idex_funct3_a[0];
     wire [31:0] div_abs_a  = (div_signed && fwd_rs1_a[31]) ? (~fwd_rs1_a + 32'd1) : fwd_rs1_a;
     wire [31:0] div_abs_b  = (div_signed && fwd_rs2_a[31]) ? (~fwd_rs2_a + 32'd1) : fwd_rs2_a;
 
-    wire [31:0] div_q_final = div_bz ? 32'hFFFFFFFF : (div_nq ? (~div_quot + 32'd1) : div_quot);
-    wire [31:0] div_r_final = div_bz ? div_raw_dividend : (div_nr ? (~div_rem + 32'd1) : div_rem);
-    wire [31:0] div_result  = idex_funct3_a[1] ? div_r_final : div_q_final;
+    // Iterative multiply result (64-bit negate for signed high-word)
+    wire [63:0] mul_prod_raw = {md_hi, md_lo};
+    wire [63:0] mul_prod_neg = ~mul_prod_raw + 64'd1;
+    wire [63:0] mul_prod_final = md_negate ? mul_prod_neg : mul_prod_raw;
+    wire [31:0] mul_result_iter = md_hi_result ? mul_prod_final[63:32] : mul_prod_final[31:0];
 
-    wire [31:0] ex_result_a = idex_is_mul_a ? mul_result :
-                              (idex_is_div_a && div_ready) ? div_result : alu_result_a;
+    // Divider result
+    wire [31:0] div_q_final = md_bz ? 32'hFFFFFFFF : (md_nq ? (~md_lo + 32'd1) : md_lo);
+    wire [31:0] div_r_final = md_bz ? md_raw_dividend : (md_nr ? (~md_hi + 32'd1) : md_hi);
+    wire [31:0] div_result_iter = idex_funct3_a[1] ? div_r_final : div_q_final;
+
+    wire [31:0] ex_result_a = (idex_is_muldiv_a && md_ready) ?
+                              (md_is_mul ? mul_result_iter : div_result_iter) : alu_result_a;
 
     // ================================================================
     // EX stage -- ALU B (ALU + branch, no mul/div/mem)
@@ -829,9 +832,9 @@ module rv32i_core #(
     wire redirect = redirect_a || redirect_b;
     wire [31:0] redirect_target = redirect_a ? redirect_target_a : redirect_target_b;
 
-    wire stall_div  = idex_valid_a && idex_is_div_a && !div_ready;
-    wire stall_load = load_use;
-    wire stall_pipe = stall_div || stall_load;
+    wire stall_muldiv = idex_valid_a && idex_is_muldiv_a && !md_ready;
+    wire stall_load   = load_use;
+    wire stall_pipe   = stall_muldiv || stall_load;
     wire flush      = redirect || (idex_valid_a && (idex_is_trap_a || idex_is_halt_a));
 
     wire halted = halt_o || trap_o;
@@ -948,10 +951,9 @@ module rv32i_core #(
             memwb_valid_b   <= 1'b0;
             trap_o          <= 1'b0;
             halt_o          <= 1'b0;
-            div_active      <= 1'b0;
+            md_active       <= 1'b0;
             resv_valid      <= 1'b0;
             held_valid      <= 1'b0;
-            for (int i = 1; i < 32; i++) regs[i] <= 32'b0;
         end else if (halted) begin
             // frozen
         end else begin
@@ -978,7 +980,7 @@ module rv32i_core #(
             memwb_rd_data_b <= mem_rd_data_b;
 
             // ---- EX/MEM ----
-            if (stall_div) begin
+            if (stall_muldiv) begin
                 exmem_valid_a <= 1'b0;
                 exmem_valid_b <= 1'b0;
             end else begin
@@ -1008,7 +1010,7 @@ module rv32i_core #(
             end
 
             // ---- ID/EX ----
-            if (stall_div) begin
+            if (stall_muldiv) begin
                 // hold
             end else if (flush || stall_load) begin
                 idex_valid_a <= 1'b0;
@@ -1122,28 +1124,78 @@ module rv32i_core #(
                 end
             end
 
-            // ---- Divider ----
-            if (start_div) begin
-                div_active       <= 1'b1;
-                div_cnt          <= 6'd32;
-                div_quot         <= div_abs_a;
-                div_rem          <= 32'b0;
-                div_dvsr         <= div_abs_b;
-                div_nq           <= div_signed && (fwd_rs1_a[31] ^ fwd_rs2_a[31]) && (fwd_rs2_a != 32'b0);
-                div_nr           <= div_signed && fwd_rs1_a[31];
-                div_bz           <= (fwd_rs2_a == 32'b0);
-                div_raw_dividend <= fwd_rs1_a;
-            end else if (div_active && div_cnt != 6'd0) begin
-                if (!div_trial[32]) begin
-                    div_rem  <= div_trial[31:0];
-                    div_quot <= {div_quot[30:0], 1'b1};
+            // ---- Mul/Div iterative unit ----
+            if (start_muldiv) begin
+                md_active        <= 1'b1;
+                md_cnt           <= 6'd32;
+                if (idex_is_mul_a) begin
+                    // Iterative multiply setup
+                    md_is_mul    <= 1'b1;
+                    md_hi        <= 32'b0;
+                    case (idex_funct3_a[1:0])
+                        2'b00: begin // MUL
+                            md_lo       <= fwd_rs2_a;
+                            md_b        <= fwd_rs1_a;
+                            md_negate   <= 1'b0;
+                            md_hi_result<= 1'b0;
+                        end
+                        2'b01: begin // MULH
+                            md_lo       <= (fwd_rs2_a[31]) ? (~fwd_rs2_a + 32'd1) : fwd_rs2_a;
+                            md_b        <= (fwd_rs1_a[31]) ? (~fwd_rs1_a + 32'd1) : fwd_rs1_a;
+                            md_negate   <= fwd_rs1_a[31] ^ fwd_rs2_a[31];
+                            md_hi_result<= 1'b1;
+                        end
+                        2'b10: begin // MULHSU
+                            md_lo       <= fwd_rs2_a;
+                            md_b        <= (fwd_rs1_a[31]) ? (~fwd_rs1_a + 32'd1) : fwd_rs1_a;
+                            md_negate   <= fwd_rs1_a[31];
+                            md_hi_result<= 1'b1;
+                        end
+                        2'b11: begin // MULHU
+                            md_lo       <= fwd_rs2_a;
+                            md_b        <= fwd_rs1_a;
+                            md_negate   <= 1'b0;
+                            md_hi_result<= 1'b1;
+                        end
+                    endcase
+                    md_nq <= 1'b0;
+                    md_nr <= 1'b0;
+                    md_bz <= 1'b0;
+                    md_raw_dividend <= 32'b0;
                 end else begin
-                    div_rem  <= {div_rem[30:0], div_quot[31]};
-                    div_quot <= {div_quot[30:0], 1'b0};
+                    // Divide setup
+                    md_is_mul        <= 1'b0;
+                    md_lo            <= div_abs_a;
+                    md_hi            <= 32'b0;
+                    md_b             <= div_abs_b;
+                    md_nq            <= div_signed && (fwd_rs1_a[31] ^ fwd_rs2_a[31]) && (fwd_rs2_a != 32'b0);
+                    md_nr            <= div_signed && fwd_rs1_a[31];
+                    md_bz            <= (fwd_rs2_a == 32'b0);
+                    md_raw_dividend  <= fwd_rs1_a;
+                    md_negate        <= 1'b0;
+                    md_hi_result     <= 1'b0;
                 end
-                div_cnt <= div_cnt - 6'd1;
-            end else if (div_ready) begin
-                div_active <= 1'b0;
+            end else if (md_active && md_cnt != 6'd0) begin
+                if (md_is_mul) begin
+                    // Multiply iteration: right-shift approach
+                    if (md_lo[0]) begin
+                        {md_hi, md_lo} <= {mul_partial, md_lo[31:1]};
+                    end else begin
+                        {md_hi, md_lo} <= {1'b0, md_hi, md_lo[31:1]};
+                    end
+                end else begin
+                    // Divide iteration
+                    if (!div_trial[32]) begin
+                        md_hi  <= div_trial[31:0];
+                        md_lo  <= {md_lo[30:0], 1'b1};
+                    end else begin
+                        md_hi  <= {md_hi[30:0], md_lo[31]};
+                        md_lo  <= {md_lo[30:0], 1'b0};
+                    end
+                end
+                md_cnt <= md_cnt - 6'd1;
+            end else if (md_ready) begin
+                md_active <= 1'b0;
             end
 
             // ---- LR/SC ----
