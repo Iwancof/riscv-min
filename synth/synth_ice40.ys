@@ -1,0 +1,4 @@
+read_verilog -sv rtl/rv32i_core.sv
+hierarchy -check -top rv32i_core
+synth_ice40 -top rv32i_core -json build/synth/rv32i_core_ice40.json
+stat

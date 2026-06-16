@@ -1,0 +1,29 @@
+read_verilog -sv rtl/rv32i_core.sv
+hierarchy -check -top rv32i_core
+
+proc
+opt
+fsm
+opt
+memory
+opt
+
+wreduce
+peepopt
+opt -full
+freduce
+opt -full
+
+techmap
+opt -full
+
+dfflibmap -liberty synth/generic_cmos.lib
+abc -liberty synth/generic_cmos.lib -D 1
+opt_clean
+abc -liberty synth/generic_cmos.lib -D 1
+opt_clean
+abc -liberty synth/generic_cmos.lib -D 1
+clean
+
+stat -liberty synth/generic_cmos.lib
+write_json build/synth/rv32i_core_mapped.json

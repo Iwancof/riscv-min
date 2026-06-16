@@ -1,0 +1,93 @@
+library(generic_cmos) {
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  voltage_unit : "1V";
+  current_unit : "1mA";
+  pulling_resistance_unit : "1kohm";
+  capacitive_load_unit(1, "pf");
+  leakage_power_unit : "1nW";
+  default_fanout_load : 1.0;
+  default_input_pin_cap : 0.01;
+  default_output_pin_cap : 0.01;
+  default_max_transition : 10.0;
+
+  lu_table_template(delay_template) {
+    variable_1 : input_net_transition;
+    variable_2 : total_output_net_capacitance;
+    index_1("1.0");
+    index_2("1.0");
+  }
+
+  cell(INVX1) {
+    area : 1.0;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "!A"; }
+  }
+
+  cell(BUFX1) {
+    area : 1.0;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "A"; }
+  }
+
+  cell(AND2X1) {
+    area : 2.0;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(B) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "A & B"; }
+  }
+
+  cell(OR2X1) {
+    area : 2.0;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(B) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "A | B"; }
+  }
+
+  cell(NAND2X1) {
+    area : 1.5;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(B) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "!(A & B)"; }
+  }
+
+  cell(NOR2X1) {
+    area : 1.5;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(B) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "!(A | B)"; }
+  }
+
+  cell(XOR2X1) {
+    area : 4.0;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(B) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "A ^ B"; }
+  }
+
+  cell(XNOR2X1) {
+    area : 4.0;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(B) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "!(A ^ B)"; }
+  }
+
+  cell(MUX2X1) {
+    area : 4.0;
+    pin(A) { direction : input; capacitance : 0.01; }
+    pin(B) { direction : input; capacitance : 0.01; }
+    pin(S) { direction : input; capacitance : 0.01; }
+    pin(Y) { direction : output; function : "(!S & A) | (S & B)"; }
+  }
+
+  cell(DFFPOSX1) {
+    area : 6.0;
+    ff(IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+    }
+    pin(CLK) { direction : input; clock : true; capacitance : 0.01; }
+    pin(D) { direction : input; capacitance : 0.01; }
+    pin(Q) { direction : output; function : "IQ"; }
+  }
+}

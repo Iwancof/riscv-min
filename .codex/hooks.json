@@ -1,0 +1,2 @@
+{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"'/home/iwancof/.agents/skills/agmsg/scripts/check-inbox.sh' 'codex' '/home/iwancof/WorkSpace/Verilog/RISC-V-min'","commandWindows":"& 'C:\\Program Files\\Git\\bin\\bash.exe' -lc 'PATH=''/home/iwancof/.agents/bin'':$PATH; ''/home/iwancof/.agents/skills/agmsg/scripts/check-inbox.sh'' ''codex'' ''/home/iwancof/WorkSpace/Verilog/RISC-V-min'''"}]}]}}
+
