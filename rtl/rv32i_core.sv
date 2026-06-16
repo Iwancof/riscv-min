@@ -116,6 +116,7 @@ module rv32i_core #(
     // ================================================================
     logic        ex_phase;           // 0 = computing slot A, 1 = computing slot B
     logic [31:0] ex_result_a_saved;  // holds A's result during phase 1
+    logic [31:0] ex_rs2_a_saved;     // holds A's fwd_rs2 during phase 1
 
     wire [32:0] div_trial   = {md_hi, md_lo[31]} - {1'b0, md_b};
     wire [32:0] mul_partial = {1'b0, md_hi} + {1'b0, md_b};
@@ -635,10 +636,11 @@ module rv32i_core #(
     // ================================================================
     // EX-stage register file reads (moved from ID to save pipeline regs)
     // ================================================================
-    wire [31:0] ex_rf_rs1_a = (idex_rs1_a == 5'd0) ? 32'b0 : regs[idex_rs1_a];
-    wire [31:0] ex_rf_rs2_a = (idex_rs2_a == 5'd0) ? 32'b0 : regs[idex_rs2_a];
-    wire [31:0] ex_rf_rs1_b = (idex_rs1_b == 5'd0) ? 32'b0 : regs[idex_rs1_b];
-    wire [31:0] ex_rf_rs2_b = (idex_rs2_b == 5'd0) ? 32'b0 : regs[idex_rs2_b];
+    // Shared RF read ports: time-multiplexed between A (phase 0) and B (phase 1)
+    wire [4:0]  rf_rs1_idx = in_phase_b ? idex_rs1_b : idex_rs1_a;
+    wire [4:0]  rf_rs2_idx = in_phase_b ? idex_rs2_b : idex_rs2_a;
+    wire [31:0] ex_rf_rs1 = (rf_rs1_idx == 5'd0) ? 32'b0 : regs[rf_rs1_idx];
+    wire [31:0] ex_rf_rs2 = (rf_rs2_idx == 5'd0) ? 32'b0 : regs[rf_rs2_idx];
 
     // ================================================================
     // Hazard detection (load-use)
@@ -674,14 +676,14 @@ module rv32i_core #(
     wire fwd_ema_rs1_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_a) && !fwd_emb_rs1_a;
 
     wire [31:0] fwd_rs1_a = fwd_emb_rs1_a ? exmem_fwd_b :
-                             fwd_ema_rs1_a ? exmem_fwd_a : ex_rf_rs1_a;
+                             fwd_ema_rs1_a ? exmem_fwd_a : ex_rf_rs1;
 
     // EX slot A rs2 (2 sources: exmem_b > exmem_a)
     wire fwd_emb_rs2_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_a);
     wire fwd_ema_rs2_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_a) && !fwd_emb_rs2_a;
 
     wire [31:0] fwd_rs2_a = fwd_emb_rs2_a ? exmem_fwd_b :
-                             fwd_ema_rs2_a ? exmem_fwd_a : ex_rf_rs2_a;
+                             fwd_ema_rs2_a ? exmem_fwd_a : ex_rf_rs2;
 
     // Slot B is bypass-free: uses direct EX-stage RF reads
 
@@ -697,8 +699,8 @@ module rv32i_core #(
     wire [31:0] alu_b_a = idex_alu_src_imm_a ? idex_imm_a : fwd_rs2_a;
 
     // Mux ALU inputs: phase 0 = slot A, phase 1 = slot B
-    wire [31:0] alu_in_a = in_phase_b ? ex_rf_rs1_b : alu_a_a;
-    wire [31:0] alu_in_b = in_phase_b ? (idex_alu_src_imm_b ? idex_imm_b : ex_rf_rs2_b) : alu_b_a;
+    wire [31:0] alu_in_a = in_phase_b ? ex_rf_rs1 : alu_a_a;
+    wire [31:0] alu_in_b = in_phase_b ? (idex_alu_src_imm_b ? idex_imm_b : ex_rf_rs2) : alu_b_a;
     wire [3:0]  alu_op   = in_phase_b ? idex_alu_op_b : idex_alu_op_a;
 
     wire        alu_do_sub = (alu_op == 4'b1000) || (alu_op == 4'b0010) || (alu_op == 4'b0011);
@@ -933,6 +935,7 @@ module rv32i_core #(
             end else if (stall_alu_phase) begin
                 ex_phase <= 1'b1;
                 ex_result_a_saved <= ex_result_a;
+                ex_rs2_a_saved    <= fwd_rs2_a;
             end else begin
                 ex_phase <= 1'b0;
             end
@@ -1145,7 +1148,7 @@ module rv32i_core #(
     always_ff @(posedge clk) begin
         exmem_result_a    <= (idex_wb_sel_a == WB_PC4) ? ex_pc4_a :
                              (ex_phase ? ex_result_a_saved : ex_result_a);
-        exmem_rs2_val_a   <= fwd_rs2_a;
+        exmem_rs2_val_a   <= ex_phase ? ex_rs2_a_saved : fwd_rs2_a;
         exmem_rd_a        <= idex_rd_a;
         exmem_funct3_a    <= idex_funct3_a;
         exmem_amo_type_a  <= idex_amo_type_a;
