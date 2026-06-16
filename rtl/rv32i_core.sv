@@ -937,28 +937,19 @@ module rv32i_core #(
                 ex_phase <= 1'b0;
             end
 
-            // ---- EX/MEM ----
+            // ---- EX/MEM (valid/control only; payload in unconditional block below) ----
             if (stall_muldiv || stall_alu_phase) begin
                 exmem_valid_a <= 1'b0;
                 exmem_valid_b <= 1'b0;
             end else begin
                 exmem_valid_a     <= idex_valid_a;
-                exmem_result_a    <= (idex_wb_sel_a == WB_PC4) ? ex_pc4_a :
-                                     (ex_phase ? ex_result_a_saved : ex_result_a);
-                exmem_rs2_val_a   <= fwd_rs2_a;
-                exmem_rd_a        <= idex_rd_a;
-                exmem_funct3_a    <= idex_funct3_a;
                 exmem_rd_we_a     <= idex_rd_we_a && !idex_is_trap_a && !idex_is_halt_a;
                 exmem_mem_read_a  <= idex_mem_read_a;
                 exmem_mem_write_a <= idex_mem_write_a && !idex_is_trap_a && !idex_is_halt_a;
                 exmem_is_halt_a   <= idex_is_halt_a;
                 exmem_is_trap_a   <= idex_is_trap_a;
-                exmem_amo_type_a  <= idex_amo_type_a;
-                exmem_amo_funct5_a<= idex_amo_funct5_a;
 
                 exmem_valid_b     <= redirect_a ? 1'b0 : idex_valid_b;
-                exmem_fwd_b       <= ex_result_b;
-                exmem_rd_b        <= idex_rd_b;
                 exmem_rd_we_b     <= idex_rd_we_b;
             end
 
@@ -1145,5 +1136,22 @@ module rv32i_core #(
                 resv_valid <= 1'b0;
             end
         end
+    end
+
+    // ================================================================
+    // EXMEM payload -- unconditional write (don't-care when valid==0)
+    // Written every cycle so synthesizer can use plain DFF instead of DFFE.
+    // ================================================================
+    always_ff @(posedge clk) begin
+        exmem_result_a    <= (idex_wb_sel_a == WB_PC4) ? ex_pc4_a :
+                             (ex_phase ? ex_result_a_saved : ex_result_a);
+        exmem_rs2_val_a   <= fwd_rs2_a;
+        exmem_rd_a        <= idex_rd_a;
+        exmem_funct3_a    <= idex_funct3_a;
+        exmem_amo_type_a  <= idex_amo_type_a;
+        exmem_amo_funct5_a<= idex_amo_funct5_a;
+
+        exmem_fwd_b       <= ex_result_b;
+        exmem_rd_b        <= idex_rd_b;
     end
 endmodule
