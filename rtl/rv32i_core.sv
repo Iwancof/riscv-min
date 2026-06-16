@@ -36,6 +36,7 @@ module rv32i_core #(
     // --- IF/ID ---
     logic [31:0] ifid_pc, ifid_instr;
     logic        ifid_valid;
+    logic        ifid_compressed; // was this a compressed instruction? (PC+2 vs PC+4)
 
     // --- ID/EX ---
     logic [31:0] idex_pc, idex_rs1_val, idex_rs2_val, idex_imm;
@@ -48,6 +49,7 @@ module rv32i_core #(
     logic        idex_is_muldiv, idex_is_halt, idex_is_trap;
     logic [1:0]  idex_wb_sel;
     logic        idex_valid;
+    logic        idex_compressed;
 
     // --- EX/MEM ---
     logic [31:0] exmem_result, exmem_rs2_val, exmem_pc4;
@@ -75,11 +77,233 @@ module rv32i_core #(
     wire        div_ready = div_active && (div_cnt == 6'd0);
 
     // ================================================================
-    // IF stage
+    // RV32C Decompressor — map 16-bit compressed instructions to 32-bit
+    // ================================================================
+    function automatic [31:0] decompress(input [15:0] ci);
+        // Pre-declare all temporaries at function scope (Verilator-compatible)
+        logic [31:0] out;
+        logic [4:0]  rd_c, rs1_c, rs2_c;  // compact register decoded
+        logic [4:0]  rd_f, rs2_f;          // full-range register
+        logic [4:0]  shamt;
+        logic [5:0]  imm6;
+        logic [6:0]  off7;
+        logic [7:0]  off8;
+        logic [8:0]  off9;
+        logic [9:0]  nzuimm10;
+        logic [11:0] imm12;
+        logic [10:0] joff11;   // C.J/C.JAL offset[11:1] (11 bits, bit 0 implicit)
+        logic [12:0] bimm13;
+        logic [20:0] jimm21;
+
+        out = 32'h0000_0000; // default: illegal
+
+        case (ci[1:0])
+        // ============================================================
+        // Quadrant 0
+        // ============================================================
+        2'b00: begin
+            rd_c  = {2'b01, ci[4:2]};
+            rs1_c = {2'b01, ci[9:7]};
+            rs2_c = {2'b01, ci[4:2]};
+            case (ci[15:13])
+            3'b000: begin // C.ADDI4SPN
+                nzuimm10 = {ci[10:7], ci[12:11], ci[5], ci[6], 2'b00};
+                if (nzuimm10 != 10'd0) begin
+                    imm12 = {2'b0, nzuimm10};
+                    out = {imm12, 5'd2, 3'b000, rd_c, 7'b0010011};
+                end
+            end
+            3'b010: begin // C.LW
+                off7 = {ci[5], ci[12:10], ci[6], 2'b00};
+                out = {5'b0, off7, rs1_c, 3'b010, rd_c, 7'b0000011};
+            end
+            3'b110: begin // C.SW
+                off7 = {ci[5], ci[12:10], ci[6], 2'b00};
+                out = {5'b0, off7[6:5], rs2_c, rs1_c, 3'b010, off7[4:0], 7'b0100011};
+            end
+            default: ;
+            endcase
+        end
+
+        // ============================================================
+        // Quadrant 1
+        // ============================================================
+        2'b01: begin
+            rd_c  = {2'b01, ci[9:7]};
+            rs2_c = {2'b01, ci[4:2]};
+            rd_f  = ci[11:7];
+            imm6  = {ci[12], ci[6:2]};
+
+            case (ci[15:13])
+            3'b000: begin // C.NOP / C.ADDI
+                imm12 = {{6{imm6[5]}}, imm6};
+                out = {imm12, rd_f, 3'b000, rd_f, 7'b0010011};
+            end
+            3'b001: begin // C.JAL (RV32)
+                joff11 = {ci[12], ci[8], ci[10:9], ci[6], ci[7], ci[2], ci[11], ci[5:3]};
+                jimm21 = {{9{joff11[10]}}, joff11, 1'b0};
+                out = {jimm21[20], jimm21[10:1], jimm21[11], jimm21[19:12], 5'd1, 7'b1101111};
+            end
+            3'b010: begin // C.LI
+                imm12 = {{6{imm6[5]}}, imm6};
+                out = {imm12, 5'd0, 3'b000, rd_f, 7'b0010011};
+            end
+            3'b011: begin // C.ADDI16SP / C.LUI
+                if (rd_f == 5'd2) begin
+                    nzuimm10 = {ci[12], ci[4:3], ci[5], ci[2], ci[6], 4'b0000};
+                    imm12 = {{2{nzuimm10[9]}}, nzuimm10};
+                    out = {imm12, 5'd2, 3'b000, 5'd2, 7'b0010011};
+                end else if (rd_f != 5'd0) begin
+                    out = {{14{imm6[5]}}, imm6, 12'b0};
+                    out[11:7] = rd_f;
+                    out[6:0]  = 7'b0110111;
+                end
+            end
+            3'b100: begin // ALU group
+                case (ci[11:10])
+                2'b00: begin // C.SRLI
+                    shamt = ci[6:2];
+                    out = {7'b0000000, shamt, rd_c, 3'b101, rd_c, 7'b0010011};
+                end
+                2'b01: begin // C.SRAI
+                    shamt = ci[6:2];
+                    out = {7'b0100000, shamt, rd_c, 3'b101, rd_c, 7'b0010011};
+                end
+                2'b10: begin // C.ANDI
+                    imm12 = {{6{imm6[5]}}, imm6};
+                    out = {imm12, rd_c, 3'b111, rd_c, 7'b0010011};
+                end
+                2'b11: begin // register-register
+                    case ({ci[12], ci[6:5]})
+                    3'b000: out = {7'b0100000, rs2_c, rd_c, 3'b000, rd_c, 7'b0110011}; // SUB
+                    3'b001: out = {7'b0000000, rs2_c, rd_c, 3'b100, rd_c, 7'b0110011}; // XOR
+                    3'b010: out = {7'b0000000, rs2_c, rd_c, 3'b110, rd_c, 7'b0110011}; // OR
+                    3'b011: out = {7'b0000000, rs2_c, rd_c, 3'b111, rd_c, 7'b0110011}; // AND
+                    default: ;
+                    endcase
+                end
+                endcase
+            end
+            3'b101: begin // C.J
+                joff11 = {ci[12], ci[8], ci[10:9], ci[6], ci[7], ci[2], ci[11], ci[5:3]};
+                jimm21 = {{9{joff11[10]}}, joff11, 1'b0};
+                out = {jimm21[20], jimm21[10:1], jimm21[11], jimm21[19:12], 5'd0, 7'b1101111};
+            end
+            3'b110: begin // C.BEQZ
+                off9 = {ci[12], ci[6:5], ci[2], ci[11:10], ci[4:3], 1'b0};
+                bimm13 = {{4{off9[8]}}, off9};
+                out = {bimm13[12], bimm13[10:5], 5'd0, rd_c, 3'b000, bimm13[4:1], bimm13[11], 7'b1100011};
+            end
+            3'b111: begin // C.BNEZ
+                off9 = {ci[12], ci[6:5], ci[2], ci[11:10], ci[4:3], 1'b0};
+                bimm13 = {{4{off9[8]}}, off9};
+                out = {bimm13[12], bimm13[10:5], 5'd0, rd_c, 3'b001, bimm13[4:1], bimm13[11], 7'b1100011};
+            end
+            endcase
+        end
+
+        // ============================================================
+        // Quadrant 2
+        // ============================================================
+        2'b10: begin
+            rd_f  = ci[11:7];
+            rs2_f = ci[6:2];
+            case (ci[15:13])
+            3'b000: begin // C.SLLI
+                shamt = ci[6:2];
+                if (rd_f != 5'd0)
+                    out = {7'b0000000, shamt, rd_f, 3'b001, rd_f, 7'b0010011};
+            end
+            3'b010: begin // C.LWSP
+                off8 = {ci[3:2], ci[12], ci[6:4], 2'b00};
+                if (rd_f != 5'd0)
+                    out = {4'b0, off8, 5'd2, 3'b010, rd_f, 7'b0000011};
+            end
+            3'b100: begin // C.JR / C.MV / C.EBREAK / C.JALR / C.ADD
+                if (ci[12] == 1'b0) begin
+                    if (rs2_f == 5'd0) begin // C.JR
+                        if (rd_f != 5'd0)
+                            out = {12'b0, rd_f, 3'b000, 5'd0, 7'b1100111};
+                    end else begin // C.MV
+                        out = {7'b0000000, rs2_f, 5'd0, 3'b000, rd_f, 7'b0110011};
+                    end
+                end else begin
+                    if (rs2_f == 5'd0) begin
+                        if (rd_f == 5'd0) // C.EBREAK
+                            out = 32'h00100073;
+                        else // C.JALR
+                            out = {12'b0, rd_f, 3'b000, 5'd1, 7'b1100111};
+                    end else begin // C.ADD
+                        out = {7'b0000000, rs2_f, rd_f, 3'b000, rd_f, 7'b0110011};
+                    end
+                end
+            end
+            3'b110: begin // C.SWSP
+                off8 = {ci[8:7], ci[12:9], 2'b00};
+                out = {4'b0, off8[7:5], rs2_f, 5'd2, 3'b010, off8[4:0], 7'b0100011};
+            end
+            default: ;
+            endcase
+        end
+
+        default: ; // ci[1:0]==11 should never be called
+        endcase
+
+        decompress = out;
+    endfunction
+
+    // ================================================================
+    // IF stage — supports 2-byte aligned PC with half-word buffer
     // ================================================================
     logic [31:0] pc_q;
-    assign imem_addr_o = pc_q;
+    logic [15:0] hwbuf;        // half-word buffer for cross-boundary 32-bit instrs
+    logic        hwbuf_valid;  // hwbuf holds lower 16 bits of a spanning instr
+
+    // Always word-aligned memory access
+    assign imem_addr_o = {pc_q[31:2], 2'b00};
     assign pc_o        = pc_q;
+
+    // IF stage fetch / decompress logic
+    logic [31:0] if_instr;     // decoded 32-bit instruction
+    logic        if_is_compressed;
+    logic        if_stall_xword; // stall for cross-word-boundary fetch
+
+    always_comb begin
+        if_instr        = 32'h0000_0013; // NOP default
+        if_is_compressed = 1'b0;
+        if_stall_xword  = 1'b0;
+
+        if (hwbuf_valid) begin
+            // We have the lower 16 bits buffered from last cycle;
+            // upper half of current word provides upper 16 bits
+            if_instr = {imem_rdata_i[15:0], hwbuf};
+            if_is_compressed = 1'b0; // it's a full 32-bit instruction
+        end else if (pc_q[1] == 1'b0) begin
+            // PC is word-aligned: instruction at bits [15:0] or [31:0]
+            if (imem_rdata_i[1:0] != 2'b11) begin
+                // Compressed instruction in lower half
+                if_instr = decompress(imem_rdata_i[15:0]);
+                if_is_compressed = 1'b1;
+            end else begin
+                // Full 32-bit instruction, entirely within this word
+                if_instr = imem_rdata_i;
+                if_is_compressed = 1'b0;
+            end
+        end else begin
+            // PC is halfword-aligned: instruction at bits [31:16]
+            if (imem_rdata_i[17:16] != 2'b11) begin
+                // Compressed instruction in upper half
+                if_instr = decompress(imem_rdata_i[31:16]);
+                if_is_compressed = 1'b1;
+            end else begin
+                // 32-bit instruction crosses word boundary → need next word
+                // Stall this cycle; buffer the lower 16 bits
+                if_stall_xword = 1'b1;
+                if_instr = 32'h0000_0013; // NOP placeholder (won't be used)
+                if_is_compressed = 1'b0;
+            end
+        end
+    end
 
     // ================================================================
     // ID stage — decode
@@ -282,7 +506,7 @@ module rv32i_core #(
     end
 
     wire [31:0] branch_target = idex_pc + idex_imm;
-    wire [31:0] ex_pc4 = idex_pc + 32'd4;
+    wire [31:0] ex_pc4 = idex_pc + (idex_compressed ? 32'd2 : 32'd4);
 
     wire redirect = idex_valid && !idex_is_trap && !idex_is_halt &&
                     (idex_is_jal || idex_is_jalr || branch_taken);
@@ -318,6 +542,7 @@ module rv32i_core #(
     // ================================================================
     wire stall_div  = idex_valid && idex_is_div && !div_ready;
     wire stall_load = load_use;
+    wire stall_xword = if_stall_xword && !flush;
     wire stall_pipe = stall_div || stall_load;
     wire flush      = redirect || (idex_valid && (idex_is_trap || idex_is_halt));
 
@@ -390,14 +615,15 @@ module rv32i_core #(
     // ================================================================
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            pc_q       <= RESET_PC;
-            ifid_valid <= 1'b0;
-            idex_valid <= 1'b0;
-            exmem_valid<= 1'b0;
-            memwb_valid<= 1'b0;
-            trap_o     <= 1'b0;
-            halt_o     <= 1'b0;
-            div_active <= 1'b0;
+            pc_q        <= RESET_PC;
+            ifid_valid  <= 1'b0;
+            idex_valid  <= 1'b0;
+            exmem_valid <= 1'b0;
+            memwb_valid <= 1'b0;
+            trap_o      <= 1'b0;
+            halt_o      <= 1'b0;
+            div_active  <= 1'b0;
+            hwbuf_valid <= 1'b0;
             for (int i = 1; i < 32; i++) regs[i] <= 32'b0;
         end else if (halted) begin
             // frozen
@@ -465,6 +691,7 @@ module rv32i_core #(
                 idex_wb_sel     <= id_wb_sel;
                 idex_is_halt    <= id_is_halt;
                 idex_is_trap    <= id_is_trap;
+                idex_compressed <= ifid_compressed;
             end
 
             // ---- IF/ID update ----
@@ -472,17 +699,38 @@ module rv32i_core #(
                 // hold
             end else if (flush) begin
                 ifid_valid <= 1'b0;
+                hwbuf_valid <= 1'b0;
+            end else if (stall_xword) begin
+                // Cross-word-boundary: buffer upper 16 bits, emit bubble
+                hwbuf       <= imem_rdata_i[31:16];
+                hwbuf_valid <= 1'b1;
+                ifid_valid  <= 1'b0;
             end else begin
-                ifid_valid <= 1'b1;
-                ifid_pc    <= pc_q;
-                ifid_instr <= imem_rdata_i;
+                ifid_valid      <= 1'b1;
+                ifid_pc         <= pc_q;
+                ifid_instr      <= if_instr;
+                ifid_compressed <= if_is_compressed;
+                if (hwbuf_valid)
+                    hwbuf_valid <= 1'b0;
             end
 
             // ---- PC update ----
-            if (redirect)
+            if (redirect) begin
                 pc_q <= redirect_target;
-            else if (!stall_pipe)
-                pc_q <= pc_q + 32'd4;
+                hwbuf_valid <= 1'b0;
+            end else if (!stall_pipe) begin
+                if (stall_xword) begin
+                    // Move PC to next word (the word containing upper half)
+                    pc_q <= {pc_q[31:2] + 30'd1, 2'b00};
+                end else if (hwbuf_valid) begin
+                    // Cross-boundary instr started at prev_word+2, length 4.
+                    // During stall we advanced PC to next word. Now advance +2
+                    // to land at prev_word + 2 + 4 = next_word + 2.
+                    pc_q <= pc_q + 32'd2;
+                end else begin
+                    pc_q <= pc_q + (if_is_compressed ? 32'd2 : 32'd4);
+                end
+            end
 
             // ---- Divider ----
             if (start_div) begin
