@@ -73,10 +73,9 @@ module rv32i_core #(
     logic [1:0]  exmem_wb_sel_a;
     logic        exmem_is_halt_a, exmem_is_trap_a, exmem_valid_a;
 
-    logic [31:0] exmem_result_b, exmem_pc4_b;
+    logic [31:0] exmem_fwd_b;
     logic [4:0]  exmem_rd_b;
     logic        exmem_rd_we_b;
-    logic [1:0]  exmem_wb_sel_b;
     logic        exmem_valid_b;
 
     // --- MEM/WB ---
@@ -657,7 +656,6 @@ module rv32i_core #(
     // Forwarding (4 sources: exmem_b > exmem_a > memwb_b > memwb_a)
     // ================================================================
     wire [31:0] exmem_fwd_a = (exmem_wb_sel_a == WB_PC4) ? exmem_pc4_a : exmem_result_a;
-    wire [31:0] exmem_fwd_b = (exmem_wb_sel_b == WB_PC4) ? exmem_pc4_b : exmem_result_b;
 
     // EX slot A rs1
     wire fwd_emb_rs1_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_a);
@@ -930,7 +928,7 @@ module rv32i_core #(
                                 (exmem_wb_sel_a == WB_MEM) ? load_data :
                                 (exmem_wb_sel_a == WB_PC4) ? exmem_pc4_a : exmem_result_a;
 
-    wire [31:0] mem_rd_data_b = (exmem_wb_sel_b == WB_PC4) ? exmem_pc4_b : exmem_result_b;
+    wire [31:0] mem_rd_data_b = exmem_fwd_b;
 
     // ================================================================
     // Sequential logic
@@ -1007,11 +1005,9 @@ module rv32i_core #(
                 exmem_amo_funct5_a<= idex_amo_funct5_a;
 
                 exmem_valid_b     <= redirect_a ? 1'b0 : idex_valid_b;
-                exmem_result_b    <= ex_result_b;
-                exmem_pc4_b       <= ex_pc4_b;
+                exmem_fwd_b       <= (idex_wb_sel_b == WB_PC4) ? ex_pc4_b : ex_result_b;
                 exmem_rd_b        <= idex_rd_b;
                 exmem_rd_we_b     <= idex_rd_we_b;
-                exmem_wb_sel_b    <= idex_wb_sel_b;
             end
 
             // ---- ID/EX ----
