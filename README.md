@@ -26,6 +26,7 @@ Cell library: `synth/generic_cmos.lib` (NAND2=1.5, DFF=6.0, DFFE=7.5, MUX2=4.0)
 | 10 | Shared RF read ports (4→2) | 39,889 | 48.8% | -8,510 | RF mux tree を半減; 読み出しインデックスを ALU phase で時分割 |
 | 11 | Single RF write port | 35,027 | 42.8% | -4,862 | B を EX phase-1 の ALU から直接 WB (MEM は必ず bubble で衝突不可能); EXMEM_B 全削除; forwarding を exmem_a 1 ソースに; 死んだ stall/検査を除去 |
 | 12 | 3-stage pipeline (IF/ID merge) | 33,594 | 41.1% | -1,433 | fetch+decompress+decode+issue を1段に融合; IFID レジスタ約100bit と rotation 機構を全廃; 分岐ペナルティ 2→1 cycle |
+| 13 | B positive-list decode ほか | 33,026 | 40.4% | -568 | B デコーダを許可リスト化 (拒否側のフルデコード網を削除); LR/SC 予約セットを全メモリ粒度に (resv_addr 32bit+比較器削除, 仕様上合法); md_raw_dividend 削除; halt/trap を EX で直接検出 |
 
 ## Branches
 

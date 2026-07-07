@@ -23,8 +23,6 @@ module rv32i_core #(
                      OP_REG    = 7'b0110011, OP_FENCE  = 7'b0001111,
                      OP_SYSTEM = 7'b1110011, OP_AMO    = 7'b0101111;
 
-    localparam [1:0] WB_EX = 2'b00, WB_MEM = 2'b01, WB_PC4 = 2'b10;
-
     // Compact control-flow encoding (saves DFFE+decode area vs 3 separate bits)
     localparam [1:0] CF_NONE = 2'd0, CF_BRANCH = 2'd1, CF_JAL = 2'd2, CF_JALR = 2'd3;
 
@@ -52,7 +50,6 @@ module rv32i_core #(
     logic        idex_is_muldiv_a, idex_is_halt_a, idex_is_trap_a;
     logic [1:0]  idex_amo_type_a;  // AMO_NONE / AMO_LR / AMO_SC / AMO_RMW
     logic [4:0]  idex_amo_funct5_a;
-    logic [1:0]  idex_wb_sel_a;
     logic        idex_valid_a, idex_compressed_a;
 
     // Derived signals from compact encodings
@@ -67,7 +64,6 @@ module rv32i_core #(
     logic [4:0]  idex_rd_b, idex_rs1_b, idex_rs2_b;
     logic [3:0]  idex_alu_op_b;
     logic        idex_alu_src_imm_b;
-    logic        idex_rd_we_b;
     logic        idex_valid_b;
 
     // --- EX/MEM ---
@@ -77,7 +73,7 @@ module rv32i_core #(
     logic        exmem_rd_we_a, exmem_mem_read_a, exmem_mem_write_a;
     logic [1:0]  exmem_amo_type_a;  // AMO_NONE / AMO_LR / AMO_SC / AMO_RMW
     logic [4:0]  exmem_amo_funct5_a;
-    logic        exmem_is_halt_a, exmem_is_trap_a, exmem_valid_a;
+    logic        exmem_valid_a;
 
     // Derived signals from compact encoding
     wire exmem_is_amo_a = (exmem_amo_type_a == AMO_RMW);
@@ -100,7 +96,6 @@ module rv32i_core #(
     logic [5:0]  md_cnt;
     logic [31:0] md_lo, md_hi, md_b;
     logic        md_nq, md_nr, md_bz;
-    logic [31:0] md_raw_dividend;
     logic        md_negate, md_hi_result;
 
     // ================================================================
@@ -115,9 +110,12 @@ module rv32i_core #(
     wire        md_ready    = md_active && (md_cnt == 6'd0);
 
     // ================================================================
-    // A extension -- LR/SC reservation set
+    // A extension -- LR/SC reservation set.
+    // Granularity is implementation-defined (RVA); this core uses the whole
+    // address space as one reservation set, so only a valid bit is needed.
+    // Any store (incl. SC/AMO) invalidates the reservation -- conservative
+    // and legal; constrained LR/SC loops contain no other stores.
     // ================================================================
-    logic [31:0] resv_addr;
     logic        resv_valid;
 
     // ================================================================
@@ -429,7 +427,6 @@ module rv32i_core #(
     logic        id_is_muldiv_a, id_is_halt_a, id_is_trap_a;
     logic        id_is_amo_a, id_is_lr_a, id_is_sc_a;
     logic [4:0]  id_amo_funct5_a;
-    logic [1:0]  id_wb_sel_a;
 
     always_comb begin
         id_alu_op_a      = 4'b0000;
@@ -448,15 +445,14 @@ module rv32i_core #(
         id_is_lr_a       = 1'b0;
         id_is_sc_a       = 1'b0;
         id_amo_funct5_a  = 5'b0;
-        id_wb_sel_a      = WB_EX;
 
         case (id_opcode_a)
             OP_LUI:    begin id_alu_src_imm_a = 1'b1; id_rd_we_a = 1'b1; end
             OP_AUIPC:  begin id_alu_src_imm_a = 1'b1; id_alu_src_pc_a = 1'b1; id_rd_we_a = 1'b1; end
-            OP_JAL:    begin id_is_jal_a = 1'b1; id_rd_we_a = 1'b1; id_wb_sel_a = WB_PC4; end
-            OP_JALR:   begin id_alu_src_imm_a = 1'b1; id_is_jalr_a = 1'b1; id_rd_we_a = 1'b1; id_wb_sel_a = WB_PC4; end
+            OP_JAL:    begin id_is_jal_a = 1'b1; id_rd_we_a = 1'b1; end
+            OP_JALR:   begin id_alu_src_imm_a = 1'b1; id_is_jalr_a = 1'b1; id_rd_we_a = 1'b1; end
             OP_BRANCH: begin id_alu_op_a = 4'b1000; id_is_branch_a = 1'b1; end
-            OP_LOAD:   begin id_alu_src_imm_a = 1'b1; id_mem_read_a = 1'b1; id_rd_we_a = 1'b1; id_wb_sel_a = WB_MEM; end
+            OP_LOAD:   begin id_alu_src_imm_a = 1'b1; id_mem_read_a = 1'b1; id_rd_we_a = 1'b1; end
             OP_STORE:  begin id_alu_src_imm_a = 1'b1; id_mem_write_a = 1'b1; end
             OP_IMM:    begin
                 id_alu_op_a = (id_funct3_a == 3'b101) ? {id_f7b5_a, id_funct3_a} : {1'b0, id_funct3_a};
@@ -470,12 +466,12 @@ module rv32i_core #(
                 end
             end
             OP_AMO: begin
-                id_rd_we_a = 1'b1; id_mem_read_a = 1'b1; id_alu_src_imm_a = 1'b1; id_wb_sel_a = WB_MEM;
+                id_rd_we_a = 1'b1; id_mem_read_a = 1'b1; id_alu_src_imm_a = 1'b1;
                 id_amo_funct5_a = if_instr_a[31:27];
                 if (if_instr_a[31:27] == 5'b00010) begin
                     id_is_lr_a = 1'b1;
                 end else if (if_instr_a[31:27] == 5'b00011) begin
-                    id_is_sc_a = 1'b1; id_mem_write_a = 1'b1; id_wb_sel_a = WB_EX;
+                    id_is_sc_a = 1'b1; id_mem_write_a = 1'b1;
                 end else begin
                     id_is_amo_a = 1'b1; id_mem_write_a = 1'b1;
                 end
@@ -489,119 +485,38 @@ module rv32i_core #(
         endcase
     end
 
-    // Slot B decode
+    // Slot B decode -- positive list only. B accepts exactly
+    // LUI / OP-IMM (non-shift) / OP-REG (non-shift, non-M); every other
+    // instruction is rejected for dual-issue and executes in slot A after
+    // the PC-based refetch. All accepted ops write rd via the plain ALU,
+    // so no other control signals need decoding at all.
     wire [6:0] id_opcode_b = if_instr_b[6:0];
     wire [4:0] id_rd_b     = if_instr_b[11:7];
     wire [2:0] id_funct3_b = if_instr_b[14:12];
     wire       id_f7b5_b   = if_instr_b[30];
-    wire [6:0] id_funct7_b = if_instr_b[31:25];
 
-    logic [4:0] id_rs1_b, id_rs2_b;
-    always_comb begin
-        id_rs1_b = if_instr_b[19:15];
-        id_rs2_b = if_instr_b[24:20];
-        case (id_opcode_b)
-            OP_LUI, OP_AUIPC, OP_JAL: begin id_rs1_b = 5'd0; id_rs2_b = 5'd0; end
-            OP_JALR, OP_LOAD, OP_IMM:  id_rs2_b = 5'd0;
-            default: ;
-        endcase
-    end
+    wire b_f3_shift = (id_funct3_b == 3'b001) || (id_funct3_b == 3'b101);
+    wire b_op_lui   = (id_opcode_b == OP_LUI);
+    wire b_op_imm   = (id_opcode_b == OP_IMM) && !b_f3_shift;
+    wire b_op_reg   = (id_opcode_b == OP_REG) && !b_f3_shift &&
+                      (if_instr_b[31:25] != 7'b0000001);
+    wire b_ok       = b_op_lui || b_op_imm || b_op_reg;
 
-    wire [31:0] imm_i_b = {{20{if_instr_b[31]}}, if_instr_b[31:20]};
-    wire [31:0] imm_s_b = {{20{if_instr_b[31]}}, if_instr_b[31:25], if_instr_b[11:7]};
-    wire [31:0] imm_b_b = {{19{if_instr_b[31]}}, if_instr_b[31], if_instr_b[7],
-                            if_instr_b[30:25], if_instr_b[11:8], 1'b0};
-    wire [31:0] imm_u_b = {if_instr_b[31:12], 12'b0};
-    wire [31:0] imm_j_b = {{11{if_instr_b[31]}}, if_instr_b[31], if_instr_b[19:12],
-                            if_instr_b[20], if_instr_b[30:21], 1'b0};
-
-    logic [31:0] id_imm_b;
-    always_comb begin
-        case (id_opcode_b)
-            OP_LUI, OP_AUIPC:         id_imm_b = imm_u_b;
-            OP_JAL:                    id_imm_b = imm_j_b;
-            OP_BRANCH:                 id_imm_b = imm_b_b;
-            OP_STORE:                  id_imm_b = imm_s_b;
-            OP_AMO:                    id_imm_b = 32'b0;
-            default:                   id_imm_b = imm_i_b;
-        endcase
-    end
-
-    logic [3:0]  id_alu_op_b;
-    logic        id_alu_src_imm_b, id_alu_src_pc_b;
-    logic        id_mem_read_b, id_mem_write_b, id_rd_we_b;
-    logic        id_is_branch_b, id_is_jal_b, id_is_jalr_b;
-    logic        id_is_muldiv_b, id_is_halt_b, id_is_trap_b;
-    logic        id_is_amo_b, id_is_lr_b, id_is_sc_b;
-    logic [1:0]  id_wb_sel_b;
-
-    always_comb begin
-        id_alu_op_b      = 4'b0000;
-        id_alu_src_imm_b = 1'b0;
-        id_alu_src_pc_b  = 1'b0;
-        id_mem_read_b    = 1'b0;
-        id_mem_write_b   = 1'b0;
-        id_rd_we_b       = 1'b0;
-        id_is_branch_b   = 1'b0;
-        id_is_jal_b      = 1'b0;
-        id_is_jalr_b     = 1'b0;
-        id_is_muldiv_b   = 1'b0;
-        id_is_halt_b     = 1'b0;
-        id_is_trap_b     = 1'b0;
-        id_is_amo_b      = 1'b0;
-        id_is_lr_b       = 1'b0;
-        id_is_sc_b       = 1'b0;
-        id_wb_sel_b      = WB_EX;
-
-        case (id_opcode_b)
-            OP_LUI:    begin id_alu_src_imm_b = 1'b1; id_rd_we_b = 1'b1; end
-            OP_AUIPC:  begin id_alu_src_imm_b = 1'b1; id_alu_src_pc_b = 1'b1; id_rd_we_b = 1'b1; end
-            OP_JAL:    begin id_is_jal_b = 1'b1; id_rd_we_b = 1'b1; id_wb_sel_b = WB_PC4; end
-            OP_JALR:   begin id_alu_src_imm_b = 1'b1; id_is_jalr_b = 1'b1; id_rd_we_b = 1'b1; id_wb_sel_b = WB_PC4; end
-            OP_BRANCH: begin id_alu_op_b = 4'b1000; id_is_branch_b = 1'b1; end
-            OP_LOAD:   begin id_alu_src_imm_b = 1'b1; id_mem_read_b = 1'b1; id_rd_we_b = 1'b1; id_wb_sel_b = WB_MEM; end
-            OP_STORE:  begin id_alu_src_imm_b = 1'b1; id_mem_write_b = 1'b1; end
-            OP_IMM: begin
-                id_alu_op_b = (id_funct3_b == 3'b101) ? {id_f7b5_b, id_funct3_b} : {1'b0, id_funct3_b};
-                id_alu_src_imm_b = 1'b1; id_rd_we_b = 1'b1;
-            end
-            OP_REG: begin
-                if (id_funct7_b == 7'b0000001) begin
-                    id_is_muldiv_b = 1'b1; id_rd_we_b = 1'b1;
-                end else begin
-                    id_alu_op_b = {id_f7b5_b, id_funct3_b}; id_rd_we_b = 1'b1;
-                end
-            end
-            OP_AMO: begin
-                id_rd_we_b = 1'b1; id_mem_read_b = 1'b1; id_alu_src_imm_b = 1'b1; id_wb_sel_b = WB_MEM;
-                if (if_instr_b[31:27] == 5'b00010) id_is_lr_b = 1'b1;
-                else if (if_instr_b[31:27] == 5'b00011) begin
-                    id_is_sc_b = 1'b1; id_mem_write_b = 1'b1; id_wb_sel_b = WB_EX;
-                end else begin
-                    id_is_amo_b = 1'b1; id_mem_write_b = 1'b1;
-                end
-            end
-            OP_FENCE: ;
-            OP_SYSTEM: begin
-                if (if_instr_b == 32'h00100073) id_is_halt_b = 1'b1;
-                else id_is_trap_b = 1'b1;
-            end
-            default: id_is_trap_b = 1'b1;
-        endcase
-    end
+    wire [4:0]  id_rs1_b = b_op_lui ? 5'd0 : if_instr_b[19:15];
+    wire [4:0]  id_rs2_b = b_op_reg ? if_instr_b[24:20] : 5'd0;
+    wire [31:0] id_imm_b = b_op_lui ? {if_instr_b[31:12], 12'b0}
+                                    : {{20{if_instr_b[31]}}, if_instr_b[31:20]};
+    wire [3:0]  id_alu_op_b = b_op_lui ? 4'b0000 :
+                              b_op_reg ? {id_f7b5_b, id_funct3_b} :
+                                         {1'b0, id_funct3_b};
+    wire        id_alu_src_imm_b = !b_op_reg;
 
     // ================================================================
     // Dual-issue feasibility
     // ================================================================
-    wire b_is_shift = (id_opcode_b == OP_IMM || id_opcode_b == OP_REG) &&
-                      (id_funct3_b == 3'b001 || id_funct3_b == 3'b101);
-    wire b_is_control = (id_opcode_b == OP_BRANCH) || (id_opcode_b == OP_JAL) ||
-                        (id_opcode_b == OP_JALR) || (id_opcode_b == OP_AUIPC);
-    wire b_structural = id_mem_read_b || id_mem_write_b || id_is_amo_b || id_is_lr_b || id_is_sc_b ||
-                        id_is_muldiv_b || id_is_halt_b || id_is_trap_b || b_is_shift || b_is_control;
     wire b_raw = id_rd_we_a && (id_rd_a != 5'd0) &&
                  ((id_rs1_b == id_rd_a) || (id_rs2_b == id_rd_a));
-    wire b_waw = id_rd_we_a && id_rd_we_b && (id_rd_a != 5'd0) && (id_rd_a == id_rd_b);
+    wire b_waw = id_rd_we_a && (id_rd_a != 5'd0) && (id_rd_a == id_rd_b);
     wire a_is_redirect = id_is_jal_a || id_is_jalr_a || id_is_branch_a;
 
     wire a_is_shift = (id_opcode_a == OP_IMM || id_opcode_a == OP_REG) &&
@@ -616,7 +531,7 @@ module rv32i_core #(
     wire b_needs_bypass = idex_valid_a && idex_rd_we_a && (idex_rd_a != 5'd0) &&
                           ((id_rs1_b == idex_rd_a) || (id_rs2_b == idex_rd_a));
 
-    wire can_dual_issue = if_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
+    wire can_dual_issue = if_valid_b && b_ok && !b_raw && !b_waw && !a_is_redirect &&
                           !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a && !a_is_shift &&
                           !b_needs_bypass;
 
@@ -738,7 +653,7 @@ module rv32i_core #(
 
     // Divider result
     wire [31:0] div_q_final = md_bz ? 32'hFFFFFFFF : (md_nq ? (~md_lo + 32'd1) : md_lo);
-    wire [31:0] div_r_final = md_bz ? md_raw_dividend : (md_nr ? (~md_hi + 32'd1) : md_hi);
+    wire [31:0] div_r_final = md_bz ? fwd_rs1_a : (md_nr ? (~md_hi + 32'd1) : md_hi);
     wire [31:0] div_result_iter = idex_funct3_a[1] ? div_r_final : div_q_final;
 
     // ex_result_a uses alu_result (which is for slot A in phase 0)
@@ -845,7 +760,7 @@ module rv32i_core #(
         endcase
     end
 
-    wire sc_success = exmem_is_sc_a && resv_valid && (resv_addr == exmem_result_a);
+    wire sc_success = exmem_is_sc_a && resv_valid;
 
     wire [31:0] mem_rd_data_a = exmem_is_sc_a  ? {31'b0, ~sc_success} :
                                 (exmem_is_amo_a || exmem_is_lr_a) ? dmem_rdata_i :
@@ -858,7 +773,7 @@ module rv32i_core #(
     // stage is guaranteed to hold a bubble in that cycle (stall_alu_phase
     // gated EXMEM to invalid), so the two writers can never collide.
     // ================================================================
-    wire        rf_wb_b  = in_phase_b && idex_valid_b && idex_rd_we_b;
+    wire        rf_wb_b  = in_phase_b && idex_valid_b;  // all B ops write rd
     wire [4:0]  rf_waddr = rf_wb_b ? idex_rd_b : exmem_rd_a;
     wire [31:0] rf_wdata = rf_wb_b ? alu_result : mem_rd_data_a;
     wire        rf_we    = (rf_wb_b || (exmem_valid_a && exmem_rd_we_a)) && (rf_waddr != 5'd0);
@@ -885,8 +800,10 @@ module rv32i_core #(
             if (rf_we)
                 regs[rf_waddr] <= rf_wdata;
 
-            if (exmem_valid_a && exmem_is_trap_a) trap_o <= 1'b1;
-            if (exmem_valid_a && exmem_is_halt_a) halt_o <= 1'b1;
+            // Halt/trap fire from EX: anything older is in MEM and completes
+            // its WB / store at this very edge, so state is consistent.
+            if (idex_valid_a && idex_is_trap_a) trap_o <= 1'b1;
+            if (idex_valid_a && idex_is_halt_a) halt_o <= 1'b1;
 
             // ---- ALU phase control ----
             if (flush) begin
@@ -907,8 +824,6 @@ module rv32i_core #(
                 exmem_rd_we_a     <= idex_rd_we_a && !idex_is_trap_a && !idex_is_halt_a;
                 exmem_mem_read_a  <= idex_mem_read_a;
                 exmem_mem_write_a <= idex_mem_write_a && !idex_is_trap_a && !idex_is_halt_a;
-                exmem_is_halt_a   <= idex_is_halt_a;
-                exmem_is_trap_a   <= idex_is_trap_a;
             end
 
             // ---- ID/EX ----
@@ -935,7 +850,6 @@ module rv32i_core #(
                                      id_is_jal_a    ? CF_JAL :
                                      id_is_jalr_a   ? CF_JALR : CF_NONE;
                 idex_is_muldiv_a  <= id_is_muldiv_a;
-                idex_wb_sel_a     <= id_wb_sel_a;
                 idex_is_halt_a    <= id_is_halt_a;
                 idex_is_trap_a    <= id_is_trap_a;
                 idex_amo_type_a   <= id_is_lr_a  ? AMO_LR :
@@ -951,7 +865,6 @@ module rv32i_core #(
                 idex_rs2_b        <= id_rs2_b;
                 idex_alu_op_b     <= id_alu_op_b;
                 idex_alu_src_imm_b<= id_alu_src_imm_b;
-                idex_rd_we_b      <= id_rd_we_b;
             end
 
             // ---- PC update ----
@@ -1008,10 +921,6 @@ module rv32i_core #(
                             md_hi_result<= 1'b1;
                         end
                     endcase
-                    md_nq <= 1'b0;
-                    md_nr <= 1'b0;
-                    md_bz <= 1'b0;
-                    md_raw_dividend <= 32'b0;
                 end else begin
                     // Divide setup
                     md_is_mul        <= 1'b0;
@@ -1021,7 +930,6 @@ module rv32i_core #(
                     md_nq            <= div_signed && (fwd_rs1_a[31] ^ fwd_rs2_a[31]) && (fwd_rs2_a != 32'b0);
                     md_nr            <= div_signed && fwd_rs1_a[31];
                     md_bz            <= (fwd_rs2_a == 32'b0);
-                    md_raw_dividend  <= fwd_rs1_a;
                     md_negate        <= 1'b0;
                     md_hi_result     <= 1'b0;
                 end
@@ -1055,15 +963,10 @@ module rv32i_core #(
             end
 
             // ---- LR/SC ----
-            if (exmem_valid_a && exmem_is_lr_a) begin
-                resv_addr  <= exmem_result_a;
+            if (exmem_valid_a && exmem_is_lr_a)
                 resv_valid <= 1'b1;
-            end else if (exmem_valid_a && exmem_is_sc_a) begin
+            else if (exmem_valid_a && (exmem_is_sc_a || exmem_mem_write_a))
                 resv_valid <= 1'b0;
-            end else if (exmem_valid_a && exmem_mem_write_a && resv_valid &&
-                         exmem_result_a == resv_addr) begin
-                resv_valid <= 1'b0;
-            end
         end
     end
 
@@ -1072,7 +975,7 @@ module rv32i_core #(
     // Written every cycle so synthesizer can use plain DFF instead of DFFE.
     // ================================================================
     always_ff @(posedge clk) begin
-        exmem_result_a    <= (idex_wb_sel_a == WB_PC4) ? ex_pc4_a :
+        exmem_result_a    <= (idex_is_jal_a || idex_is_jalr_a) ? ex_pc4_a :
                              (ex_phase ? ex_result_a_saved : ex_result_a);
         exmem_rs2_val_a   <= ex_phase ? ex_rs2_a_saved : fwd_rs2_a;
         exmem_rd_a        <= idex_rd_a;
