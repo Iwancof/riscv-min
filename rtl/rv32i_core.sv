@@ -38,16 +38,9 @@ module rv32i_core #(
 
     // ================================================================
     // Pipeline registers -- dual slots (A = older, B = younger)
+    // 3-stage pipeline: IF/ID merged (fetch+decompress+decode+issue in one
+    // stage, no IFID registers) -> EX -> MEM.
     // ================================================================
-    // --- IF/ID ---
-    logic [31:0] ifid_pc_a, ifid_instr_a;
-    logic        ifid_valid_a, ifid_compressed_a;
-    logic [31:0] ifid_instr_b;
-    logic        ifid_valid_b, ifid_compressed_b;
-
-    // B's PC is always derivable from A
-    wire [31:0] ifid_pc_b = ifid_pc_a + (ifid_compressed_a ? 32'd2 : 32'd4);
-
     // --- ID/EX ---
     logic [31:0] idex_pc_a, idex_imm_a;
     logic [4:0]  idex_rd_a, idex_rs1_a, idex_rs2_a;
@@ -329,7 +322,6 @@ module rv32i_core #(
     logic        if_b_32_fits;
 
     // Instruction A is always fetchable (PC is 2-byte aligned, window is 8 bytes)
-    wire         if_valid_a = 1'b1;
 
     always_comb begin
         if_instr_a      = 32'h0000_0013;
@@ -393,16 +385,16 @@ module rv32i_core #(
     // ================================================================
 
     // Slot A decode
-    wire [6:0] id_opcode_a = ifid_instr_a[6:0];
-    wire [4:0] id_rd_a     = ifid_instr_a[11:7];
-    wire [2:0] id_funct3_a = ifid_instr_a[14:12];
-    wire       id_f7b5_a   = ifid_instr_a[30];
-    wire [6:0] id_funct7_a = ifid_instr_a[31:25];
+    wire [6:0] id_opcode_a = if_instr_a[6:0];
+    wire [4:0] id_rd_a     = if_instr_a[11:7];
+    wire [2:0] id_funct3_a = if_instr_a[14:12];
+    wire       id_f7b5_a   = if_instr_a[30];
+    wire [6:0] id_funct7_a = if_instr_a[31:25];
 
     logic [4:0] id_rs1_a, id_rs2_a;
     always_comb begin
-        id_rs1_a = ifid_instr_a[19:15];
-        id_rs2_a = ifid_instr_a[24:20];
+        id_rs1_a = if_instr_a[19:15];
+        id_rs2_a = if_instr_a[24:20];
         case (id_opcode_a)
             OP_LUI, OP_AUIPC, OP_JAL: begin id_rs1_a = 5'd0; id_rs2_a = 5'd0; end
             OP_JALR, OP_LOAD, OP_IMM:  id_rs2_a = 5'd0;
@@ -410,13 +402,13 @@ module rv32i_core #(
         endcase
     end
 
-    wire [31:0] imm_i_a = {{20{ifid_instr_a[31]}}, ifid_instr_a[31:20]};
-    wire [31:0] imm_s_a = {{20{ifid_instr_a[31]}}, ifid_instr_a[31:25], ifid_instr_a[11:7]};
-    wire [31:0] imm_b_a = {{19{ifid_instr_a[31]}}, ifid_instr_a[31], ifid_instr_a[7],
-                            ifid_instr_a[30:25], ifid_instr_a[11:8], 1'b0};
-    wire [31:0] imm_u_a = {ifid_instr_a[31:12], 12'b0};
-    wire [31:0] imm_j_a = {{11{ifid_instr_a[31]}}, ifid_instr_a[31], ifid_instr_a[19:12],
-                            ifid_instr_a[20], ifid_instr_a[30:21], 1'b0};
+    wire [31:0] imm_i_a = {{20{if_instr_a[31]}}, if_instr_a[31:20]};
+    wire [31:0] imm_s_a = {{20{if_instr_a[31]}}, if_instr_a[31:25], if_instr_a[11:7]};
+    wire [31:0] imm_b_a = {{19{if_instr_a[31]}}, if_instr_a[31], if_instr_a[7],
+                            if_instr_a[30:25], if_instr_a[11:8], 1'b0};
+    wire [31:0] imm_u_a = {if_instr_a[31:12], 12'b0};
+    wire [31:0] imm_j_a = {{11{if_instr_a[31]}}, if_instr_a[31], if_instr_a[19:12],
+                            if_instr_a[20], if_instr_a[30:21], 1'b0};
 
     logic [31:0] id_imm_a;
     always_comb begin
@@ -479,10 +471,10 @@ module rv32i_core #(
             end
             OP_AMO: begin
                 id_rd_we_a = 1'b1; id_mem_read_a = 1'b1; id_alu_src_imm_a = 1'b1; id_wb_sel_a = WB_MEM;
-                id_amo_funct5_a = ifid_instr_a[31:27];
-                if (ifid_instr_a[31:27] == 5'b00010) begin
+                id_amo_funct5_a = if_instr_a[31:27];
+                if (if_instr_a[31:27] == 5'b00010) begin
                     id_is_lr_a = 1'b1;
-                end else if (ifid_instr_a[31:27] == 5'b00011) begin
+                end else if (if_instr_a[31:27] == 5'b00011) begin
                     id_is_sc_a = 1'b1; id_mem_write_a = 1'b1; id_wb_sel_a = WB_EX;
                 end else begin
                     id_is_amo_a = 1'b1; id_mem_write_a = 1'b1;
@@ -490,7 +482,7 @@ module rv32i_core #(
             end
             OP_FENCE: ;
             OP_SYSTEM: begin
-                if (ifid_instr_a == 32'h00100073) id_is_halt_a = 1'b1;
+                if (if_instr_a == 32'h00100073) id_is_halt_a = 1'b1;
                 else id_is_trap_a = 1'b1;
             end
             default: id_is_trap_a = 1'b1;
@@ -498,16 +490,16 @@ module rv32i_core #(
     end
 
     // Slot B decode
-    wire [6:0] id_opcode_b = ifid_instr_b[6:0];
-    wire [4:0] id_rd_b     = ifid_instr_b[11:7];
-    wire [2:0] id_funct3_b = ifid_instr_b[14:12];
-    wire       id_f7b5_b   = ifid_instr_b[30];
-    wire [6:0] id_funct7_b = ifid_instr_b[31:25];
+    wire [6:0] id_opcode_b = if_instr_b[6:0];
+    wire [4:0] id_rd_b     = if_instr_b[11:7];
+    wire [2:0] id_funct3_b = if_instr_b[14:12];
+    wire       id_f7b5_b   = if_instr_b[30];
+    wire [6:0] id_funct7_b = if_instr_b[31:25];
 
     logic [4:0] id_rs1_b, id_rs2_b;
     always_comb begin
-        id_rs1_b = ifid_instr_b[19:15];
-        id_rs2_b = ifid_instr_b[24:20];
+        id_rs1_b = if_instr_b[19:15];
+        id_rs2_b = if_instr_b[24:20];
         case (id_opcode_b)
             OP_LUI, OP_AUIPC, OP_JAL: begin id_rs1_b = 5'd0; id_rs2_b = 5'd0; end
             OP_JALR, OP_LOAD, OP_IMM:  id_rs2_b = 5'd0;
@@ -515,13 +507,13 @@ module rv32i_core #(
         endcase
     end
 
-    wire [31:0] imm_i_b = {{20{ifid_instr_b[31]}}, ifid_instr_b[31:20]};
-    wire [31:0] imm_s_b = {{20{ifid_instr_b[31]}}, ifid_instr_b[31:25], ifid_instr_b[11:7]};
-    wire [31:0] imm_b_b = {{19{ifid_instr_b[31]}}, ifid_instr_b[31], ifid_instr_b[7],
-                            ifid_instr_b[30:25], ifid_instr_b[11:8], 1'b0};
-    wire [31:0] imm_u_b = {ifid_instr_b[31:12], 12'b0};
-    wire [31:0] imm_j_b = {{11{ifid_instr_b[31]}}, ifid_instr_b[31], ifid_instr_b[19:12],
-                            ifid_instr_b[20], ifid_instr_b[30:21], 1'b0};
+    wire [31:0] imm_i_b = {{20{if_instr_b[31]}}, if_instr_b[31:20]};
+    wire [31:0] imm_s_b = {{20{if_instr_b[31]}}, if_instr_b[31:25], if_instr_b[11:7]};
+    wire [31:0] imm_b_b = {{19{if_instr_b[31]}}, if_instr_b[31], if_instr_b[7],
+                            if_instr_b[30:25], if_instr_b[11:8], 1'b0};
+    wire [31:0] imm_u_b = {if_instr_b[31:12], 12'b0};
+    wire [31:0] imm_j_b = {{11{if_instr_b[31]}}, if_instr_b[31], if_instr_b[19:12],
+                            if_instr_b[20], if_instr_b[30:21], 1'b0};
 
     logic [31:0] id_imm_b;
     always_comb begin
@@ -582,8 +574,8 @@ module rv32i_core #(
             end
             OP_AMO: begin
                 id_rd_we_b = 1'b1; id_mem_read_b = 1'b1; id_alu_src_imm_b = 1'b1; id_wb_sel_b = WB_MEM;
-                if (ifid_instr_b[31:27] == 5'b00010) id_is_lr_b = 1'b1;
-                else if (ifid_instr_b[31:27] == 5'b00011) begin
+                if (if_instr_b[31:27] == 5'b00010) id_is_lr_b = 1'b1;
+                else if (if_instr_b[31:27] == 5'b00011) begin
                     id_is_sc_b = 1'b1; id_mem_write_b = 1'b1; id_wb_sel_b = WB_EX;
                 end else begin
                     id_is_amo_b = 1'b1; id_mem_write_b = 1'b1;
@@ -591,7 +583,7 @@ module rv32i_core #(
             end
             OP_FENCE: ;
             OP_SYSTEM: begin
-                if (ifid_instr_b == 32'h00100073) id_is_halt_b = 1'b1;
+                if (if_instr_b == 32'h00100073) id_is_halt_b = 1'b1;
                 else id_is_trap_b = 1'b1;
             end
             default: id_is_trap_b = 1'b1;
@@ -624,7 +616,7 @@ module rv32i_core #(
     wire b_needs_bypass = idex_valid_a && idex_rd_we_a && (idex_rd_a != 5'd0) &&
                           ((id_rs1_b == idex_rd_a) || (id_rs2_b == idex_rd_a));
 
-    wire can_dual_issue = ifid_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
+    wire can_dual_issue = if_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
                           !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a && !a_is_shift &&
                           !b_needs_bypass;
 
@@ -647,7 +639,7 @@ module rv32i_core #(
                           id_opcode_a == OP_AMO);
     // Load-use for a dependent slot-B is impossible: b_needs_bypass already
     // rejects dual-issue whenever EX slot A (incl. loads) writes B's sources.
-    wire load_use = idex_valid_a && idex_mem_read_a && (idex_rd_a != 5'd0) && ifid_valid_a &&
+    wire load_use = idex_valid_a && idex_mem_read_a && (idex_rd_a != 5'd0) &&
                     ((id_uses_rs1_a && idex_rd_a == id_rs1_a) ||
                      (id_uses_rs2_a && idex_rd_a == id_rs2_a));
 
@@ -875,14 +867,9 @@ module rv32i_core #(
     // Sequential logic
     // ================================================================
 
-    // Signal: did we hold slot B this cycle?
-    wire do_hold_b = !stall_pipe && !flush && ifid_valid_a && ifid_valid_b && !can_dual_issue;
-
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             pc_q            <= RESET_PC;
-            ifid_valid_a    <= 1'b0;
-            ifid_valid_b    <= 1'b0;
             idex_valid_a    <= 1'b0;
             idex_valid_b    <= 1'b0;
             exmem_valid_a   <= 1'b0;
@@ -931,8 +918,8 @@ module rv32i_core #(
                 idex_valid_a <= 1'b0;
                 idex_valid_b <= 1'b0;
             end else begin
-                idex_valid_a      <= ifid_valid_a;
-                idex_pc_a         <= ifid_pc_a;
+                idex_valid_a      <= 1'b1;
+                idex_pc_a         <= pc_q;
                 idex_imm_a        <= id_imm_a;
                 idex_rd_a         <= id_rd_a;
                 idex_rs1_a        <= id_rs1_a;
@@ -955,9 +942,9 @@ module rv32i_core #(
                                      id_is_sc_a  ? AMO_SC :
                                      id_is_amo_a ? AMO_RMW : AMO_NONE;
                 idex_amo_funct5_a <= id_amo_funct5_a;
-                idex_compressed_a <= ifid_compressed_a;
+                idex_compressed_a <= if_compressed_a;
 
-                idex_valid_b      <= ifid_valid_a && can_dual_issue;
+                idex_valid_b      <= can_dual_issue;
                 idex_imm_b        <= id_imm_b;
                 idex_rd_b         <= id_rd_b;
                 idex_rs1_b        <= id_rs1_b;
@@ -967,44 +954,15 @@ module rv32i_core #(
                 idex_rd_we_b      <= id_rd_we_b;
             end
 
-            // ---- IF/ID ----
-            if (stall_pipe) begin
-                // hold IF/ID
-            end else if (flush) begin
-                ifid_valid_a <= 1'b0;
-                ifid_valid_b <= 1'b0;
-            end else if (do_hold_b) begin
-                // Rotate: B becomes next cycle's A, fetch new instruction for B
-                ifid_valid_a      <= 1'b1;
-                ifid_pc_a         <= ifid_pc_b;
-                ifid_instr_a      <= ifid_instr_b;
-                ifid_compressed_a <= ifid_compressed_b;
-                ifid_valid_b      <= if_valid_a;
-                ifid_instr_b      <= if_instr_a;
-                ifid_compressed_b <= if_compressed_a;
-            end else begin
-                // Normal fetch: load both slots from memory
-                ifid_valid_a      <= if_valid_a;
-                ifid_pc_a         <= pc_q;
-                ifid_instr_a      <= if_instr_a;
-                ifid_compressed_a <= if_compressed_a;
-                ifid_valid_b      <= if_valid_b;
-                ifid_instr_b      <= if_instr_b;
-                ifid_compressed_b <= if_compressed_b;
-            end
-
             // ---- PC update ----
+            // 3-stage front end: fetch+decode+issue all happen in this cycle,
+            // so PC advances by exactly what was issued. A slot-B instruction
+            // that cannot dual-issue is simply refetched next cycle as slot A
+            // (no rotation state needed).
             if (redirect) begin
                 pc_q <= redirect_target;
             end else if (!stall_pipe) begin
-                if (do_hold_b) begin
-                    // B rotated to A; fetch one new instruction for B
-                    pc_q <= if_next_pc;
-                end else if (if_valid_b) begin
-                    pc_q <= if_pc_after_b;
-                end else begin
-                    pc_q <= if_next_pc;
-                end
+                pc_q <= can_dual_issue ? if_pc_after_b : if_next_pc;
             end
 
             // ---- Mul/Div/Shift iterative unit ----
