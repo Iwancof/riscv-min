@@ -718,14 +718,12 @@ module rv32i_core #(
         endcase
     end
 
+    wire mem_wr_ok = exmem_valid_a && exmem_mem_write_a && (!exmem_is_sc_a || sc_success);
+
     logic [3:0] store_strobe;
     always_comb begin
         store_strobe = 4'b0000;
-        if (exmem_valid_a && exmem_is_amo_a)
-            store_strobe = 4'b1111;
-        else if (exmem_valid_a && exmem_is_sc_a)
-            store_strobe = sc_success ? 4'b1111 : 4'b0000;
-        else if (exmem_valid_a && exmem_mem_write_a) begin
+        if (mem_wr_ok) begin
             case (exmem_funct3_a)
                 3'b000:  store_strobe = 4'b0001 << mem_off;
                 3'b001:  store_strobe = 4'b0011 << mem_off;
@@ -735,8 +733,7 @@ module rv32i_core #(
         end
     end
 
-    assign dmem_wdata_o = exmem_is_amo_a ? amo_result :
-                          exmem_is_sc_a  ? exmem_rs2_val_a : store_data;
+    assign dmem_wdata_o = exmem_is_amo_a ? amo_result : store_data;
     assign dmem_wstrb_o = store_strobe;
 
     // ================================================================
@@ -769,7 +766,6 @@ module rv32i_core #(
     wire sc_success = exmem_is_sc_a && resv_valid;
 
     wire [31:0] mem_rd_data_a = exmem_is_sc_a  ? {31'b0, ~sc_success} :
-                                (exmem_is_amo_a || exmem_is_lr_a) ? dmem_rdata_i :
                                 exmem_mem_read_a ? load_data :
                                 exmem_result_a;
 
