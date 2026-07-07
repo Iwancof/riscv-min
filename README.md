@@ -2,10 +2,10 @@
 
 RV32IMAC CPU の面積最適化実験。Yosys + generic CMOS Liberty で合成面積を測定。
 
-## Current: 2-wide superscalar pipeline, area-optimized (39,889)
+## Current: 2-wide superscalar pipeline, area-optimized (32,321)
 
-`rtl/rv32i_core.sv` — RV32IMAC 完全準拠、2-wide in-order superscalar pipeline。
-元の 81,774 から **42.8%** まで面積を削減（パイプライン・スーパースカラ構造は維持）。
+`rtl/rv32i_core.sv` — RV32IMAC 完全準拠、2-wide in-order superscalar・3段パイプライン。
+元の 81,774 から **39.5%** まで面積を削減（パイプライン・スーパースカラ構造は維持）。
 
 ## Area Optimization History
 
@@ -27,16 +27,19 @@ Cell library: `synth/generic_cmos.lib` (NAND2=1.5, DFF=6.0, DFFE=7.5, MUX2=4.0)
 | 11 | Single RF write port | 35,027 | 42.8% | -4,862 | B を EX phase-1 の ALU から直接 WB (MEM は必ず bubble で衝突不可能); EXMEM_B 全削除; forwarding を exmem_a 1 ソースに; 死んだ stall/検査を除去 |
 | 12 | 3-stage pipeline (IF/ID merge) | 33,594 | 41.1% | -1,433 | fetch+decompress+decode+issue を1段に融合; IFID レジスタ約100bit と rotation 機構を全廃; 分岐ペナルティ 2→1 cycle |
 | 13 | B positive-list decode ほか | 33,026 | 40.4% | -568 | B デコーダを許可リスト化 (拒否側のフルデコード網を削除); LR/SC 予約セットを全メモリ粒度に (resv_addr 32bit+比較器削除, 仕様上合法); md_raw_dividend 削除; halt/trap を EX で直接検出 |
+| 14 | saved-reg 除去 + AMO 演算器共有 | 32,321 | 39.5% | -705 | exmem_result_a 自体を phase-1 の保持レジスタに転用 (ex_result_a_saved/ex_rs2_a_saved 64bit 削除); AMOADD の加算と MIN/MAX 比較を1本の加減算器に統合; amo_funct5 を 4bit 化 |
 
 ## Branches
 
 | Branch | Description | Area |
 |--------|------------|-----:|
-| `main` | 最新の最適化済みスーパースカラ (上記 #10) | 39,889 |
+| `main` | 最新の最適化済みスーパースカラ (上記 #14) | 32,321 |
 | `rv32imac-pipeline` | 最適化前のスーパースカラ (#0) | 81,774 |
-| `rv32imac-pipeline-opt` | 最適化履歴 (#0→#10 の全コミット) | 39,889 |
+| `rv32imac-pipeline-opt` | 最適化履歴 (main と同期) | 32,321 |
 | `rv32imac-area-min` | マルチサイクル FSM (パイプラインなし) | 25,806 |
 | `rv32e-minimize` | RV32E マルチサイクル (16 regs, base int only) | 9,125 |
+
+Milestone tags: `area-base` (81,774) / `area-50pct` (39,889) / `area-40pct` (32,321)
 
 ## Quick start
 

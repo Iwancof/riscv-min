@@ -49,7 +49,7 @@ module rv32i_core #(
     logic [1:0]  idex_cf_a;  // CF_NONE / CF_BRANCH / CF_JAL / CF_JALR
     logic        idex_is_muldiv_a, idex_is_halt_a, idex_is_trap_a;
     logic [1:0]  idex_amo_type_a;  // AMO_NONE / AMO_LR / AMO_SC / AMO_RMW
-    logic [4:0]  idex_amo_funct5_a;
+    logic [3:0]  idex_amo_funct5_a;  // {f5[4],f5[3],f5[2],f5[0]} -- f5[1] is 0 for every AMO
     logic        idex_valid_a, idex_compressed_a;
 
     // Derived signals from compact encodings
@@ -72,7 +72,7 @@ module rv32i_core #(
     logic [2:0]  exmem_funct3_a;
     logic        exmem_rd_we_a, exmem_mem_read_a, exmem_mem_write_a;
     logic [1:0]  exmem_amo_type_a;  // AMO_NONE / AMO_LR / AMO_SC / AMO_RMW
-    logic [4:0]  exmem_amo_funct5_a;
+    logic [3:0]  exmem_amo_funct5_a;
     logic        exmem_valid_a;
 
     // Derived signals from compact encoding
@@ -102,8 +102,6 @@ module rv32i_core #(
     // ALU sharing state: time-multiplex slot A's ALU for slot B
     // ================================================================
     logic        ex_phase;           // 0 = computing slot A, 1 = computing slot B
-    logic [31:0] ex_result_a_saved;  // holds A's result during phase 1
-    logic [31:0] ex_rs2_a_saved;     // holds A's fwd_rs2 during phase 1
 
     wire [32:0] div_trial   = {md_hi, md_lo[31]} - {1'b0, md_b};
     wire [32:0] mul_partial = {1'b0, md_hi} + {1'b0, md_b};
@@ -426,7 +424,7 @@ module rv32i_core #(
     logic        id_is_branch_a, id_is_jal_a, id_is_jalr_a;
     logic        id_is_muldiv_a, id_is_halt_a, id_is_trap_a;
     logic        id_is_amo_a, id_is_lr_a, id_is_sc_a;
-    logic [4:0]  id_amo_funct5_a;
+    logic [3:0]  id_amo_funct5_a;
 
     always_comb begin
         id_alu_op_a      = 4'b0000;
@@ -444,7 +442,7 @@ module rv32i_core #(
         id_is_amo_a      = 1'b0;
         id_is_lr_a       = 1'b0;
         id_is_sc_a       = 1'b0;
-        id_amo_funct5_a  = 5'b0;
+        id_amo_funct5_a  = 4'b0;
 
         case (id_opcode_a)
             OP_LUI:    begin id_alu_src_imm_a = 1'b1; id_rd_we_a = 1'b1; end
@@ -467,7 +465,7 @@ module rv32i_core #(
             end
             OP_AMO: begin
                 id_rd_we_a = 1'b1; id_mem_read_a = 1'b1; id_alu_src_imm_a = 1'b1;
-                id_amo_funct5_a = if_instr_a[31:27];
+                id_amo_funct5_a = {if_instr_a[31:29], if_instr_a[27]};
                 if (if_instr_a[31:27] == 5'b00010) begin
                     id_is_lr_a = 1'b1;
                 end else if (if_instr_a[31:27] == 5'b00011) begin
@@ -744,19 +742,27 @@ module rv32i_core #(
     // ================================================================
     // A extension -- AMO + LR/SC
     // ================================================================
+    // One shared adder/subtractor: ADD for AMOADD, SUB for the MIN/MAX
+    // comparisons (signed via sign fixup, unsigned via carry).
+    wire        amo_sub  = exmem_amo_funct5_a[3];      // min/max family
+    wire [32:0] amo_adds = {1'b0, dmem_rdata_i} +
+                           {1'b0, amo_sub ? ~exmem_rs2_val_a : exmem_rs2_val_a} +
+                           {32'b0, amo_sub};
+    wire        amo_lt_u = !amo_adds[32];
+    wire        amo_lt_s = (dmem_rdata_i[31] != exmem_rs2_val_a[31]) ? dmem_rdata_i[31]
+                                                                     : amo_adds[31];
+    wire        amo_lt   = exmem_amo_funct5_a[2] ? amo_lt_u : amo_lt_s;
+    wire        amo_take_mem = amo_lt ^ exmem_amo_funct5_a[1];   // min: d if d<r, max: inverted
+
     logic [31:0] amo_result;
     always_comb begin
         case (exmem_amo_funct5_a)
-            5'b00001: amo_result = exmem_rs2_val_a;
-            5'b00000: amo_result = dmem_rdata_i + exmem_rs2_val_a;
-            5'b00100: amo_result = dmem_rdata_i ^ exmem_rs2_val_a;
-            5'b01100: amo_result = dmem_rdata_i & exmem_rs2_val_a;
-            5'b01000: amo_result = dmem_rdata_i | exmem_rs2_val_a;
-            5'b10000: amo_result = ($signed(dmem_rdata_i) < $signed(exmem_rs2_val_a)) ? dmem_rdata_i : exmem_rs2_val_a;
-            5'b10100: amo_result = ($signed(dmem_rdata_i) > $signed(exmem_rs2_val_a)) ? dmem_rdata_i : exmem_rs2_val_a;
-            5'b11000: amo_result = (dmem_rdata_i < exmem_rs2_val_a) ? dmem_rdata_i : exmem_rs2_val_a;
-            5'b11100: amo_result = (dmem_rdata_i > exmem_rs2_val_a) ? dmem_rdata_i : exmem_rs2_val_a;
-            default:  amo_result = exmem_rs2_val_a;
+            4'b0001: amo_result = exmem_rs2_val_a;                    // swap
+            4'b0000: amo_result = amo_adds[31:0];                     // add
+            4'b0010: amo_result = dmem_rdata_i ^ exmem_rs2_val_a;
+            4'b0110: amo_result = dmem_rdata_i & exmem_rs2_val_a;
+            4'b0100: amo_result = dmem_rdata_i | exmem_rs2_val_a;
+            default: amo_result = amo_take_mem ? dmem_rdata_i : exmem_rs2_val_a;  // min/max
         endcase
     end
 
@@ -810,8 +816,6 @@ module rv32i_core #(
                 ex_phase <= 1'b0;
             end else if (stall_alu_phase) begin
                 ex_phase <= 1'b1;
-                ex_result_a_saved <= ex_result_a;
-                ex_rs2_a_saved    <= fwd_rs2_a;
             end else begin
                 ex_phase <= 1'b0;
             end
@@ -975,9 +979,12 @@ module rv32i_core #(
     // Written every cycle so synthesizer can use plain DFF instead of DFFE.
     // ================================================================
     always_ff @(posedge clk) begin
-        exmem_result_a    <= (idex_is_jal_a || idex_is_jalr_a) ? ex_pc4_a :
-                             (ex_phase ? ex_result_a_saved : ex_result_a);
-        exmem_rs2_val_a   <= ex_phase ? ex_rs2_a_saved : fwd_rs2_a;
+        // A-payload captured at the phase-0 edge; held (enable) through
+        // phase 1, where it already contains slot A's values.
+        if (!in_phase_b) begin
+            exmem_result_a  <= (idex_is_jal_a || idex_is_jalr_a) ? ex_pc4_a : ex_result_a;
+            exmem_rs2_val_a <= fwd_rs2_a;
+        end
         exmem_rd_a        <= idex_rd_a;
         exmem_funct3_a    <= idex_funct3_a;
         exmem_amo_type_a  <= idex_amo_type_a;
