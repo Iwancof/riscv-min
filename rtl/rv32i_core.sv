@@ -282,6 +282,85 @@ module rv32i_core #(
         decompress = out;
     endfunction
 
+    function automatic [31:0] decompress_b(input [15:0] ci);
+        logic [31:0] out;
+        logic [4:0]  rd_c, rs2_c;
+        logic [4:0]  rd_f, rs2_f;
+        logic [5:0]  imm6;
+        logic [9:0]  nzuimm10;
+        logic [11:0] imm12;
+
+        out       = 32'h0000_0000;
+        rd_c      = {2'b01, ci[9:7]};
+        rs2_c     = {2'b01, ci[4:2]};
+        rd_f      = ci[11:7];
+        rs2_f     = ci[6:2];
+        imm6      = {ci[12], ci[6:2]};
+        nzuimm10  = 10'b0;
+        imm12     = 12'b0;
+
+        case (ci[1:0])
+        2'b00: begin
+            if (ci[15:13] == 3'b000) begin
+                nzuimm10 = {ci[10:7], ci[12:11], ci[5], ci[6], 2'b00};
+                if (nzuimm10 != 10'd0) begin
+                    imm12 = {2'b0, nzuimm10};
+                    out = {imm12, 5'd2, 3'b000, rs2_c, 7'b0010011};
+                end
+            end
+        end
+
+        2'b01: begin
+            case (ci[15:13])
+            3'b000: begin
+                imm12 = {{6{imm6[5]}}, imm6};
+                out = {imm12, rd_f, 3'b000, rd_f, 7'b0010011};
+            end
+            3'b010: begin
+                imm12 = {{6{imm6[5]}}, imm6};
+                out = {imm12, 5'd0, 3'b000, rd_f, 7'b0010011};
+            end
+            3'b011: begin
+                if (rd_f == 5'd2) begin
+                    nzuimm10 = {ci[12], ci[4:3], ci[5], ci[2], ci[6], 4'b0000};
+                    imm12 = {{2{nzuimm10[9]}}, nzuimm10};
+                    out = {imm12, 5'd2, 3'b000, 5'd2, 7'b0010011};
+                end else if (rd_f != 5'd0) begin
+                    out = {{14{imm6[5]}}, imm6, rd_f, 7'b0110111};
+                end
+            end
+            3'b100: begin
+                if (ci[11:10] == 2'b10) begin
+                    imm12 = {{6{imm6[5]}}, imm6};
+                    out = {imm12, rd_c, 3'b111, rd_c, 7'b0010011};
+                end else if (ci[11:10] == 2'b11 && ci[12] == 1'b0) begin
+                    case (ci[6:5])
+                    2'b00: out = {7'b0100000, rs2_c, rd_c, 3'b000, rd_c, 7'b0110011};
+                    2'b01: out = {7'b0000000, rs2_c, rd_c, 3'b100, rd_c, 7'b0110011};
+                    2'b10: out = {7'b0000000, rs2_c, rd_c, 3'b110, rd_c, 7'b0110011};
+                    2'b11: out = {7'b0000000, rs2_c, rd_c, 3'b111, rd_c, 7'b0110011};
+                    endcase
+                end
+            end
+            default: ;
+            endcase
+        end
+
+        2'b10: begin
+            if (ci[15:13] == 3'b100 && rs2_f != 5'd0) begin
+                if (ci[12] == 1'b0)
+                    out = {7'b0000000, rs2_f, 5'd0, 3'b000, rd_f, 7'b0110011};
+                else
+                    out = {7'b0000000, rs2_f, rd_f, 3'b000, rd_f, 7'b0110011};
+            end
+        end
+
+        default: ;
+        endcase
+
+        decompress_b = out;
+    endfunction
+
     // ================================================================
     // IF stage -- Dual fetch from 64-bit window
     // ================================================================
@@ -364,7 +443,7 @@ module rv32i_core #(
 
         // Single B decompressor call
         if (if_hw_b_sel[1:0] != 2'b11) begin
-            if_instr_b = decompress(if_hw_b_sel);
+            if_instr_b = decompress_b(if_hw_b_sel);
             if_compressed_b = 1'b1;
             if_valid_b = 1'b1;
         end else if (if_b_32_fits) begin
