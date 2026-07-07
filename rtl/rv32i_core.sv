@@ -91,10 +91,9 @@ module rv32i_core #(
     wire exmem_is_lr_a  = (exmem_amo_type_a == AMO_LR);
     wire exmem_is_sc_a  = (exmem_amo_type_a == AMO_SC);
 
-    logic [31:0] exmem_fwd_b;
-    logic [4:0]  exmem_rd_b;
-    logic        exmem_rd_we_b;
-    logic        exmem_valid_b;
+    // --- EXMEM_B eliminated: slot B commits directly from EX phase 1.
+    //     The MEM stage always holds a bubble during phase 1 (the phase-0
+    //     stall gated EXMEM), so B shares the single RF write port for free.
 
     // --- MEM/WB eliminated: register file write now happens directly from EXMEM ---
 
@@ -616,18 +615,14 @@ module rv32i_core #(
     wire a_is_shift = (id_opcode_a == OP_IMM || id_opcode_a == OP_REG) &&
                       (id_funct3_a == 3'b001 || id_funct3_a == 3'b101);
 
-    // Bypass-readiness check for slot B: reject if any in-flight writer
-    // overlaps with B's source registers (IDEX_A, IDEX_B, EXMEM_A, EXMEM_B).
-    // MEMWB writes complete before EX-stage RF read, so no check needed.
-    wire b_dep_idex_a  = idex_valid_a && idex_rd_we_a && (idex_rd_a != 5'd0) &&
-                         ((id_rs1_b == idex_rd_a) || (id_rs2_b == idex_rd_a));
-    wire b_dep_idex_b  = idex_valid_b && idex_rd_we_b && (idex_rd_b != 5'd0) &&
-                         ((id_rs1_b == idex_rd_b) || (id_rs2_b == idex_rd_b));
-    wire b_dep_exmem_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) &&
-                         ((id_rs1_b == exmem_rd_a) || (id_rs2_b == exmem_rd_a));
-    wire b_dep_exmem_b = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) &&
-                         ((id_rs1_b == exmem_rd_b) || (id_rs2_b == exmem_rd_b));
-    wire b_needs_bypass = b_dep_idex_a || b_dep_idex_b || b_dep_exmem_a || b_dep_exmem_b;
+    // Bypass-readiness check for slot B (B has no forwarding network).
+    // Write timing analysis: results write to the RF at the end of the
+    // producer's MEM cycle (slot A) or EX phase-1 cycle (slot B), and B's
+    // EX-stage RF read happens one full cycle after issue. The only producer
+    // whose write is still invisible at that point is the instruction in EX
+    // slot A right now -- everything older has already reached the RF.
+    wire b_needs_bypass = idex_valid_a && idex_rd_we_a && (idex_rd_a != 5'd0) &&
+                          ((id_rs1_b == idex_rd_a) || (id_rs2_b == idex_rd_a));
 
     wire can_dual_issue = ifid_valid_b && !b_structural && !b_raw && !b_waw && !a_is_redirect &&
                           !id_is_halt_a && !id_is_trap_a && !id_is_muldiv_a && !a_is_shift &&
@@ -650,40 +645,23 @@ module rv32i_core #(
                           id_opcode_a == OP_AMO);
     wire id_uses_rs2_a = (id_opcode_a == OP_REG || id_opcode_a == OP_STORE || id_opcode_a == OP_BRANCH ||
                           id_opcode_a == OP_AMO);
-    wire id_uses_rs1_b_w = (id_opcode_b == OP_REG || id_opcode_b == OP_IMM || id_opcode_b == OP_LOAD ||
-                            id_opcode_b == OP_STORE || id_opcode_b == OP_BRANCH || id_opcode_b == OP_JALR ||
-                            id_opcode_b == OP_AMO);
-    wire id_uses_rs2_b_w = (id_opcode_b == OP_REG || id_opcode_b == OP_STORE || id_opcode_b == OP_BRANCH ||
-                            id_opcode_b == OP_AMO);
-
-    wire load_use_a = idex_valid_a && idex_mem_read_a && (idex_rd_a != 5'd0) && ifid_valid_a &&
-                      ((id_uses_rs1_a && idex_rd_a == id_rs1_a) ||
-                       (id_uses_rs2_a && idex_rd_a == id_rs2_a));
-
-    wire load_use_b_from_exa = idex_valid_a && idex_mem_read_a && (idex_rd_a != 5'd0) && ifid_valid_b && can_dual_issue &&
-                               ((id_uses_rs1_b_w && idex_rd_a == id_rs1_b) ||
-                                (id_uses_rs2_b_w && idex_rd_a == id_rs2_b));
-
-    wire load_use = load_use_a || load_use_b_from_exa;
+    // Load-use for a dependent slot-B is impossible: b_needs_bypass already
+    // rejects dual-issue whenever EX slot A (incl. loads) writes B's sources.
+    wire load_use = idex_valid_a && idex_mem_read_a && (idex_rd_a != 5'd0) && ifid_valid_a &&
+                    ((id_uses_rs1_a && idex_rd_a == id_rs1_a) ||
+                     (id_uses_rs2_a && idex_rd_a == id_rs2_a));
 
     // ================================================================
-    // Forwarding (2 sources: exmem_b > exmem_a; MEMWB handled by stall)
+    // Forwarding (single source: exmem_a)
+    // Slot B results are already in the RF (written at EX phase-1), so no
+    // exmem_b source exists. MEMWB was eliminated; its role is covered by
+    // the write-from-MEM timing (EX reads see it one cycle later).
     // ================================================================
-    wire [31:0] exmem_fwd_a = exmem_result_a;
+    wire fwd_ema_rs1_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_a);
+    wire fwd_ema_rs2_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_a);
 
-    // EX slot A rs1 (2 sources: exmem_b > exmem_a)
-    wire fwd_emb_rs1_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs1_a);
-    wire fwd_ema_rs1_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs1_a) && !fwd_emb_rs1_a;
-
-    wire [31:0] fwd_rs1_a = fwd_emb_rs1_a ? exmem_fwd_b :
-                             fwd_ema_rs1_a ? exmem_fwd_a : ex_rf_rs1;
-
-    // EX slot A rs2 (2 sources: exmem_b > exmem_a)
-    wire fwd_emb_rs2_a = exmem_valid_b && exmem_rd_we_b && (exmem_rd_b != 5'd0) && (exmem_rd_b == idex_rs2_a);
-    wire fwd_ema_rs2_a = exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && (exmem_rd_a == idex_rs2_a) && !fwd_emb_rs2_a;
-
-    wire [31:0] fwd_rs2_a = fwd_emb_rs2_a ? exmem_fwd_b :
-                             fwd_ema_rs2_a ? exmem_fwd_a : ex_rf_rs2;
+    wire [31:0] fwd_rs1_a = fwd_ema_rs1_a ? exmem_result_a : ex_rf_rs1;
+    wire [31:0] fwd_rs2_a = fwd_ema_rs2_a ? exmem_result_a : ex_rf_rs2;
 
     // Slot B is bypass-free: uses direct EX-stage RF reads
 
@@ -776,9 +754,6 @@ module rv32i_core #(
                               (idex_is_muldiv_a && md_ready) ?
                               (md_is_mul ? mul_result_iter : div_result_iter) : alu_result;
 
-    // Slot B result comes from ALU in phase 1 (or saved from phase 1 computation)
-    wire [31:0] ex_result_b = alu_result;  // valid when in_phase_b
-
     // ALU phase stall: when phase 0 has valid B, need 1 extra cycle for phase 1
     wire stall_alu_phase = idex_valid_a && idex_valid_b && !ex_phase && !stall_muldiv;
 
@@ -792,14 +767,10 @@ module rv32i_core #(
     wire stall_load   = load_use;
     wire flush      = redirect || (idex_valid_a && !in_phase_b && (idex_is_trap_a || idex_is_halt_a));
 
-    // Stall when ID-stage instruction depends on EXMEM_A (would need MEMWB forwarding)
-    // By stalling, the producer completes WB before consumer reaches EX, so RF has the value.
-    // EXMEM_B writes early to RF from EXMEM stage, so no stall needed for B dependencies.
-    // Must not stall when a flush is pending (redirect/halt/trap kills the IFID instruction anyway).
-    wire stall_exmem_dep = !flush && exmem_valid_a && exmem_rd_we_a && (exmem_rd_a != 5'd0) && ifid_valid_a &&
-        ((id_uses_rs1_a && exmem_rd_a == id_rs1_a) || (id_uses_rs2_a && exmem_rd_a == id_rs2_a));
-
-    wire stall_pipe   = stall_muldiv || stall_load || stall_exmem_dep || stall_alu_phase;
+    // No EXMEM-dependency stall needed: a producer in MEM writes the RF at the
+    // end of this cycle, and a consumer issued this cycle reads the RF in EX
+    // next cycle -- the write is already visible.
+    wire stall_pipe   = stall_muldiv || stall_load || stall_alu_phase;
 
     wire halted = halt_o || trap_o;
 
@@ -889,15 +860,20 @@ module rv32i_core #(
                                 exmem_mem_read_a ? load_data :
                                 exmem_result_a;
 
-    // Slot B writes early from EXMEM (no MEM/WB stage for B)
+    // ================================================================
+    // Register file write -- SINGLE port shared by both slots.
+    // Slot B commits straight from the ALU at the end of EX phase 1; the MEM
+    // stage is guaranteed to hold a bubble in that cycle (stall_alu_phase
+    // gated EXMEM to invalid), so the two writers can never collide.
+    // ================================================================
+    wire        rf_wb_b  = in_phase_b && idex_valid_b && idex_rd_we_b;
+    wire [4:0]  rf_waddr = rf_wb_b ? idex_rd_b : exmem_rd_a;
+    wire [31:0] rf_wdata = rf_wb_b ? alu_result : mem_rd_data_a;
+    wire        rf_we    = (rf_wb_b || (exmem_valid_a && exmem_rd_we_a)) && (rf_waddr != 5'd0);
 
     // ================================================================
     // Sequential logic
     // ================================================================
-
-    // Signal: did we actually dual-issue this cycle (for PC advancement)?
-    // This is the decision made during the ID stage for what to send to IDEX.
-    wire did_dual_issue = !stall_pipe && !flush && ifid_valid_a && can_dual_issue;
 
     // Signal: did we hold slot B this cycle?
     wire do_hold_b = !stall_pipe && !flush && ifid_valid_a && ifid_valid_b && !can_dual_issue;
@@ -910,7 +886,6 @@ module rv32i_core #(
             idex_valid_a    <= 1'b0;
             idex_valid_b    <= 1'b0;
             exmem_valid_a   <= 1'b0;
-            exmem_valid_b   <= 1'b0;
             trap_o          <= 1'b0;
             halt_o          <= 1'b0;
             md_active       <= 1'b0;
@@ -919,12 +894,9 @@ module rv32i_core #(
         end else if (halted) begin
             // frozen
         end else begin
-            // ---- WB: register file write directly from MEM stage ----
-            if (exmem_valid_a && exmem_rd_we_a && exmem_rd_a != 5'd0)
-                regs[exmem_rd_a] <= mem_rd_data_a;
-            // Early B writeback from EXMEM (after A so younger B wins on same-rd)
-            if (exmem_valid_b && exmem_rd_we_b && exmem_rd_b != 5'd0)
-                regs[exmem_rd_b] <= exmem_fwd_b;
+            // ---- WB: single-port register file write (A from MEM, B from EX phase 1) ----
+            if (rf_we)
+                regs[rf_waddr] <= rf_wdata;
 
             if (exmem_valid_a && exmem_is_trap_a) trap_o <= 1'b1;
             if (exmem_valid_a && exmem_is_halt_a) halt_o <= 1'b1;
@@ -943,7 +915,6 @@ module rv32i_core #(
             // ---- EX/MEM (valid/control only; payload in unconditional block below) ----
             if (stall_muldiv || stall_alu_phase) begin
                 exmem_valid_a <= 1'b0;
-                exmem_valid_b <= 1'b0;
             end else begin
                 exmem_valid_a     <= idex_valid_a;
                 exmem_rd_we_a     <= idex_rd_we_a && !idex_is_trap_a && !idex_is_halt_a;
@@ -951,15 +922,12 @@ module rv32i_core #(
                 exmem_mem_write_a <= idex_mem_write_a && !idex_is_trap_a && !idex_is_halt_a;
                 exmem_is_halt_a   <= idex_is_halt_a;
                 exmem_is_trap_a   <= idex_is_trap_a;
-
-                exmem_valid_b     <= redirect_a ? 1'b0 : idex_valid_b;
-                exmem_rd_we_b     <= idex_rd_we_b;
             end
 
             // ---- ID/EX ----
             if (stall_muldiv || stall_alu_phase) begin
                 // hold
-            end else if (flush || stall_load || stall_exmem_dep) begin
+            end else if (flush || stall_load) begin
                 idex_valid_a <= 1'b0;
                 idex_valid_b <= 1'b0;
             end else begin
@@ -1153,8 +1121,5 @@ module rv32i_core #(
         exmem_funct3_a    <= idex_funct3_a;
         exmem_amo_type_a  <= idex_amo_type_a;
         exmem_amo_funct5_a<= idex_amo_funct5_a;
-
-        exmem_fwd_b       <= ex_result_b;
-        exmem_rd_b        <= idex_rd_b;
     end
 endmodule
